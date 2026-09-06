@@ -1,0 +1,248 @@
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Kodexo Labs design system — app translation.
+   Source: DESIGN.md (print-first, A4, authored in pt). §9 is the web
+   conversion at 1pt = 1.3333px. Colour values are locked upstream: do not
+   invent shades, do not hand-pick greys.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* Own these namespaces outright. `initial` deletes Tailwind's defaults so
+     nobody can reach for text-sm / rounded-lg / font-sans by accident — those
+     classes stop existing and the build says so. */
+  --text-*: initial;
+  --radius-*: initial;
+  --font-*: initial;
+
+  /* ── TIER 1 · BRAND ───────────────────────────────────────────────────
+     Rationed. In-app that means ONE red run per view (the single primary
+     action), plus chrome (wordmark middot, active nav item). Nothing else. */
+  --color-red: #f54545; /* primary action, active state */
+  --color-red-deep: #b22424; /* prose links only */
+  --color-red-tint: #ffe1e1; /* ::selection */
+  --color-ink: #0a0a0f; /* DESIGN.md --black */
+
+  /* ── TIER 2 · NEUTRALS — all chrome comes from here ──────────────────── */
+  --color-n50: #fafafb;
+  --color-n100: #f4f4f5;
+  --color-n200: #e4e4e7; /* hairline border */
+  --color-n300: #d4d4d8; /* rule, control border */
+  --color-n400: #a1a1aa; /* ordinal numerals */
+  --color-n500: #71717a; /* secondary text */
+  --color-n600: #52525b;
+  --color-n700: #3f3f46; /* label text */
+  --color-n800: #27272a; /* emphasis border, focus outline */
+  --color-n900: #18181b; /* dark band, table header */
+  --color-n950: #09090b;
+
+  /* ── TIER 3 · SEMANTIC — LOCKED PAIRS ────────────────────────────────
+     Never mix a background from one pair with text from another. Use the
+     tone-* utilities below, which set both halves at once. */
+  --color-ok-bg: #dcfce7;
+  --color-ok-ink: #166534;
+  --color-warn-bg: #fef3c7;
+  --color-warn-ink: #92400e;
+  --color-err-bg: #fee2e2;
+  --color-err-ink: #991b1b;
+  --color-info-bg: #dbeafe;
+  --color-info-ink: #1e40af;
+
+  /* ── TIER 4 · ILLUSTRATION — one hue per document ─────────────────────── */
+  --color-ill-blue: #4a7dff;
+  --color-ill-green: #5f8f73;
+  --color-ill-amber: #e6a600;
+  --color-ill-purple: #7657e8;
+  --color-ill: var(--color-ill-blue); /* AI / data / RAG */
+
+  /* ── TYPE SCALE (DESIGN.md §9) ────────────────────────────────────────
+     NOTE: DESIGN.md §10 also declares `--text-body` as a COLOUR alias while
+     §9 declares it as a SIZE. In Tailwind v4 `--text-*` is the font-size
+     namespace, so sizes own it here and the §10 colour aliases are dropped in
+     favour of --color-ink / --color-n500 / --color-n700.
+     Standing rule: no --color-X may share a name with a --text-X. */
+  --text-label: 10px;
+  --text-label--line-height: 1.2;
+  --text-label--font-weight: 700;
+  --text-label--letter-spacing: 0.1em;
+
+  --text-caption: 11.5px;
+  --text-caption--line-height: 1.5;
+  --text-small: 12px;
+  --text-small--line-height: 1.45;
+  --text-list: 12.5px; /* scanning: table rows, metadata */
+  --text-list--line-height: 1.55;
+  --text-body: 14px; /* reading: prose, snippets */
+  --text-body--line-height: 1.55;
+  --text-subhead: 15px;
+  --text-subhead--line-height: 1.3;
+  --text-section: 20px;
+  --text-section--line-height: 1.2;
+  --text-cover: 53px;
+  --text-cover--line-height: 1.02;
+  --text-cover--letter-spacing: 0.005em;
+
+  --leading-body: 1.55;
+
+  /* ── TRACKING (DESIGN.md §2.3) ────────────────────────────────────────── */
+  --tracking-label: 0.1em;
+  --tracking-panel: 0.13em;
+  --tracking-callout: 0.14em;
+  --tracking-tag: 0.15em;
+  --tracking-head: 0.16em;
+  --tracking-brand: 0.2em;
+  --tracking-kicker: 0.24em;
+  --tracking-title: -0.02em;
+
+  /* ── GEOMETRY — principle 5: near-zero radius, everywhere ─────────────── */
+  --radius-box: 2px;
+
+  /* ── RHYTHM (§9 conversions) ──────────────────────────────────────────── */
+  --spacing-para: 12px; /*  9pt */
+  --spacing-cell-y: 8px; /*  6pt */
+  --spacing-cell-x: 11px; /*  8pt */
+  --spacing-panel-y: 15px; /* 11pt */
+  --spacing-panel-x: 17px; /* 13pt */
+  --spacing-section: 35px; /* 26pt */
+  --spacing-gutter: 24px;
+  --spacing-shell: 32px;
+
+  /* ── MEASURE ──────────────────────────────────────────────────────────── */
+  --container-doc: 880px;
+  --container-form: 560px;
+  --container-prose: 68ch;
+}
+
+/* Font families must be `inline`: next/font injects its variables into a class
+   applied to <html>, not into :root. A plain @theme block emits into :root at
+   the same specificity, resolved by source order — fragile. `inline` puts
+   var(--font-*-src) directly into the generated utility instead, so it resolves
+   in the element's own cascade context. */
+@theme inline {
+  --font-display: var(--font-display-src), ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-body-src), ui-sans-serif, system-ui, sans-serif;
+  --font-hyper: var(--font-hyper-src), var(--font-display-src), sans-serif;
+  --font-mono: var(--font-mono-src), ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LOCKED-PAIR UTILITIES
+   Tier 3 says never mix a background from one pair with text from another.
+   These make that structurally impossible — one class sets both halves.
+   Chips, callouts and banners use ONLY these.
+   ══════════════════════════════════════════════════════════════════════════ */
+@utility tone-neutral {
+  background-color: var(--color-n100);
+  color: var(--color-n700);
+}
+@utility tone-ok {
+  background-color: var(--color-ok-bg);
+  color: var(--color-ok-ink);
+}
+@utility tone-warn {
+  background-color: var(--color-warn-bg);
+  color: var(--color-warn-ink);
+}
+@utility tone-err {
+  background-color: var(--color-err-bg);
+  color: var(--color-err-ink);
+}
+@utility tone-info {
+  background-color: var(--color-info-bg);
+  color: var(--color-info-ink);
+}
+@utility tone-invert {
+  background-color: var(--color-n900);
+  color: #fff;
+}
+
+/* Border hierarchy carries structure — n200 hairline → n300 rule → n800
+   emphasis. Principle 6: never a shadow. */
+@utility rule-heading {
+  border-bottom: 1.5px solid var(--color-n300);
+}
+@utility rule-hair {
+  border-bottom: 1px solid var(--color-n200);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BASE
+   ══════════════════════════════════════════════════════════════════════════ */
+@layer base {
+  /* Light only. DESIGN.md §9: the export defines no dark palette, and the
+     Tier 3 locked pairs have no dark half. Declaring the scheme stops the
+     browser auto-inverting native controls and scrollbars against a palette
+     that cannot support it. */
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    font-family: var(--font-body);
+    font-size: var(--text-body);
+    line-height: var(--leading-body);
+    color: var(--color-ink);
+    background: #fff;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    margin: 0;
+  }
+
+  p {
+    margin: 0 0 var(--spacing-para);
+  }
+
+  ::selection {
+    background: var(--color-red-tint);
+    color: var(--color-ink);
+  }
+
+  /* Principle 6: NO SHADOWS. Tailwind's focus:ring-* compiles to box-shadow
+     and is therefore banned across this codebase. Focus is an outline. */
+  :focus-visible {
+    outline: 2px solid var(--color-n800);
+    outline-offset: 1px;
+  }
+
+  /* Prose links are the only --red-deep use. Nav and action links are neutral. */
+  .prose-body a {
+    color: var(--color-red-deep);
+    text-underline-offset: 2px;
+  }
+  .prose-body a:hover {
+    color: var(--color-red);
+  }
+
+  /* DELIBERATE OVERRIDE of DESIGN.md's 14px body measure for controls only:
+     iOS Safari zooms the viewport when a focused control computes below 16px,
+     and the user must pinch back out. On a search box that fires every query
+     that is the worst bug we could ship. A control is not a reading measure. */
+  input,
+  select,
+  textarea,
+  button {
+    font-family: inherit;
+    border-radius: var(--radius-box);
+  }
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  @media (min-width: 48rem) {
+    input,
+    select,
+    textarea {
+      font-size: var(--text-body);
+    }
+  }
+}

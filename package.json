@@ -1,0 +1,44 @@
+{
+  "name": "portfolio-knowledge-rag",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "eslint .",
+    "seed:admin": "node --env-file-if-exists=.env.local scripts/seed-admin.mts",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:push": "supabase db push",
+    "types:db": "supabase gen types typescript --local > src/lib/supabase/database.types.ts"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.12.6",
+    "@supabase/supabase-js": "^2.115.0",
+    "fast-xml-parser": "^5.11.1",
+    "fflate": "^0.8.3",
+    "mammoth": "^1.12.2",
+    "next": "16.3.4",
+    "openai": "^7.10.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
+    "unpdf": "^1.8.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.3.4",
+    "supabase": "^2.116.0",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

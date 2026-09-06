@@ -1,0 +1,20 @@
+<h2>Sign in to the Portfolio Knowledge Base</h2>
+
+<!--
+  token_hash + verifyOtp, NOT the default {{ .ConfirmationURL }}.
+
+  @supabase/ssr defaults to PKCE, whose code verifier is bound to the device
+  that REQUESTED the link. People request on a laptop and click in webmail on a
+  phone, and mail scanners pre-fetch URLs — both fail the ?code= exchange with
+  an error that surfaces as "expired link" for a perfectly valid link.
+
+  This mirrors the production template documented in SETUP.md §2, so local and
+  cloud behave identically.
+-->
+<p>
+  <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=magiclink">
+    Sign in
+  </a>
+</p>
+
+<p>This link expires in 15 minutes and can be used once.</p>
