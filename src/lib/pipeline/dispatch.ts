@@ -43,6 +43,14 @@ export async function dispatch(
     return;
   }
 
+  // Read ONCE, here, outside every try. The worker's catch below is
+  // deliberately swallowing, so a missing INTERNAL_BASE_URL read *inside* it
+  // would be logged and discarded — leaving every document in 'queued' with no
+  // error surfaced anywhere, which is the exact failure serverEnv's required()
+  // exists to prevent. Hoisting is what lets the throw actually escape.
+  const baseUrl = serverEnv.internalBaseUrl;
+  const internalSecret = serverEnv.internalSecret;
+
   const queue = [...documentIds];
   const workers = Array.from(
     { length: Math.min(CONCURRENCY, queue.length) },
@@ -51,9 +59,9 @@ export async function dispatch(
         const id = queue.shift();
         if (!id) break;
         try {
-          await fetch(`${serverEnv.internalBaseUrl}/api/process/${id}`, {
+          await fetch(`${baseUrl}/api/process/${id}`, {
             method: "POST",
-            headers: { "x-internal": serverEnv.internalSecret },
+            headers: { "x-internal": internalSecret },
           });
         } catch (error) {
           // Swallowed on purpose: the cron sweep re-POSTs stuck documents, so a

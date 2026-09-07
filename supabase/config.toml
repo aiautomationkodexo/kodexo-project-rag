@@ -116,12 +116,24 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Uncomment to configure local storage buckets
-# [storage.buckets.images]
-# public = false
-# file_size_limit = "50MiB"
-# allowed_mime_types = ["image/png", "image/jpeg"]
-# objects_path = "./images"
+# Declared so `npm run buckets:push` (supabase seed buckets) can create this
+# bucket through the Storage REST API — the fallback path if migration 0004's
+# INSERT into storage.buckets is ever skipped for privileges. That path runs as
+# the storage service and cannot hit a Postgres ownership error.
+#
+# MUST stay byte-identical to the array in 0004_storage_realtime.sql.
+[storage.buckets.project-files]
+public = false
+file_size_limit = "50MiB"
+allowed_mime_types = [
+  "text/plain",
+  "text/markdown",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a",
+  "video/mp4", "video/quicktime"
+]
 
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
@@ -155,10 +167,24 @@ max_indexes = 5
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ MUST BE CHANGED BEFORE THE FIRST `npm run config:push`.                 │
+# │ This file is pushed to the hosted project. Pushing 127.0.0.1 sets       │
+# │ PRODUCTION's Site URL to localhost, and since Supabase silently falls   │
+# │ back to Site URL for any redirect that is not allow-listed, every magic │
+# │ link would then point at localhost with no error anywhere.              │
+# │ Must byte-match NEXT_PUBLIC_SITE_URL, with no trailing slash.           │
+# └─────────────────────────────────────────────────────────────────────────┘
 site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
+#
+# ALSO MUST BE CHANGED BEFORE THE FIRST PUSH — replace with the production
+# origin. Both /auth/confirm (the token_hash path that matters) and
+# /auth/callback (the fallback for an unedited template) must be reachable, so
+# a /** glob on the origin covers both.
 additional_redirect_urls = ["http://127.0.0.1:3000/**", "http://localhost:3000/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
@@ -195,9 +221,16 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-# LOCAL ONLY. The default of 2 per hour makes iterating on the sign-in flow
-# impossible — you burn it in two clicks and every later request is silently
-# dropped. Production should stay low; this file is not used in production.
+#
+# THIS FILE IS NOW PUSHED TO PRODUCTION with `npm run config:push`. It used to
+# say "LOCAL ONLY … not used in production"; that is no longer true, and every
+# value below is a live setting.
+#
+# Largely moot now: auth mail is sent by the app, not by GoTrue, so this caps
+# only the fallback paths. The real throttle is RESEND_INTERVAL_MS in
+# src/lib/auth/magic-link.ts, backed by profiles.last_magic_link_at — we took
+# that responsibility on when we stopped using GoTrue's mailer. The outer wall
+# is the provider's daily quota (Gmail: ~500/day personal, ~2,000/day Workspace).
 email_sent = 100
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
@@ -234,21 +267,52 @@ enable_confirmations = false
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
 secure_password_change = false
 # Controls the minimum amount of time that must pass before sending another signup confirmation or password reset email.
-max_frequency = "1s"
+# 1s was a local-iteration convenience. Pushed to production it is a
+# per-address resend amplifier, so it is raised here.
+max_frequency = "60s"
 # Number of characters used in the email OTP.
 otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
 otp_expiry = 900
 
-# Use a production-ready SMTP server
-# [auth.email.smtp]
-# enabled = true
-# host = "smtp.sendgrid.net"
-# port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# Google SMTP with an App Password.
+#
+# ⚠ NO LONGER ON THE MAIN PATH. The app does not use GoTrue's mailer for magic
+# links any more: src/lib/auth/magic-link.ts mints the token with
+# auth.admin.generateLink() (which sends nothing and is NOT rate limited) and
+# delivers it over the app's own SMTP transport. GoTrue's per-address resend
+# interval and hourly cap were both low enough to interrupt ordinary use.
+#
+# This block is kept as a FALLBACK so that any GoTrue-initiated mail (an email
+# change, a recovery flow, or a future signInWithOtp call) still delivers
+# instead of silently failing. Same credentials as the app's SMTP_* vars.
+#
+# DEVIATION FROM PRD §1, which specifies Resend. Resend cannot deliver to any
+# address but the account owner's until a sending domain is verified with
+# SPF/DKIM, and we do not have DNS access — so on Resend every user except one
+# would be unable to sign in. Google delivers to any recipient immediately.
+# Revisit if a domain is ever verified; the app-side code is provider-neutral
+# (SMTP_* env vars), so that becomes a config change, not a code change.
+#
+# `pass` is env-substituted AT PUSH TIME from the PROCESS environment, not from
+# .env.local — which is exactly why `npm run config:push` shells the CLI through
+# `node --env-file-if-exists=.env.local`. Push with SMTP_PASSWORD unset and you
+# silently write an EMPTY SMTP password to the project.
+#
+# App Passwords require 2-Step Verification on the account, and a Workspace
+# admin can disable them org-wide. admin_email must be the authenticated
+# account or a verified "Send mail as" alias — Google rewrites the From header
+# to the authenticated account regardless of what is set here.
+#
+# Port 587 is STARTTLS; 465 is implicit TLS. Try 465 if GoTrue auth fails.
+[auth.email.smtp]
+enabled = true
+host = "smtp.gmail.com"
+port = 587
+user = "env(SMTP_USER)"
+pass = "env(SMTP_PASSWORD)"
+admin_email = "env(EMAIL_FROM)"
+sender_name = "Portfolio Knowledge Base"
 
 # Uncomment to customize email template
 # [auth.email.template.invite]
@@ -261,6 +325,9 @@ otp_expiry = 900
 # subject = "Your password has been changed"
 # content_path = "./supabase/templates/password_changed_notification.html"
 
+# Also no longer on the main path — the app composes its own magic-link email
+# in src/lib/email/magic-link.ts. Kept so the fallback above renders correctly
+# with the token_hash form rather than the default PKCE ?code= link.
 [auth.email.template.magic_link]
 subject = "Sign in to the Portfolio Knowledge Base"
 content_path = "./supabase/templates/magic_link.html"

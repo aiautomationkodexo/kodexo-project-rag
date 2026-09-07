@@ -1,7 +1,7 @@
 /**
  * Creates (or re-confirms) the super admin.
  *
- * Run with:  npm run seed:admin
+ * Run with:  npm run seed:admin -- <project-ref>
  *
  * Uses Node's native type stripping — no tsx, no build step. That is also why
  * this file uses NO `@/` path aliases and imports nothing from src/: plain Node
@@ -23,6 +23,35 @@ function required(name: string): string {
 
 const url = required("NEXT_PUBLIC_SUPABASE_URL");
 const secretKey = required("SUPABASE_SECRET_KEY");
+
+/*
+ * TARGET CONFIRMATION.
+ *
+ * There is exactly one Supabase project now, and it is production. This script
+ * mints a super admin — the one privilege 0007_privilege_lockdown.sql makes
+ * unreachable through the API — and its upsert force-resets is_active,
+ * deleted_at and is_super_admin on whatever profile carries SUPER_ADMIN_EMAIL.
+ * It must not be runnable from muscle memory or a stray `npm run`.
+ *
+ * argv rather than an interactive prompt, so CI and a human behave identically.
+ *
+ * That force-reset is deliberately NOT gated behind a flag: it is the system's
+ * only break-glass path. 0007 makes is_super_admin unwritable through the API,
+ * and getCurrentUser() signs out a super admin who deactivates themselves — if
+ * that happens, this script is the only way back in.
+ */
+const targetRef = new URL(url).hostname.split(".")[0];
+const claimedRef = process.argv[2];
+
+if (claimedRef !== targetRef) {
+  console.error(
+    `✗ Refusing to run without an explicit target.\n` +
+      `  Target : ${url}\n` +
+      `  Run    : npm run seed:admin -- ${targetRef}`,
+  );
+  process.exit(1);
+}
+console.log(`→ Target: ${url}`);
 const email = required("SUPER_ADMIN_EMAIL").trim().toLowerCase();
 const name = process.env.SUPER_ADMIN_NAME?.trim() || null;
 

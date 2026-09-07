@@ -9,11 +9,15 @@
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint .",
     "seed:admin": "node --env-file-if-exists=.env.local scripts/seed-admin.mts",
-    "db:start": "supabase start",
-    "db:stop": "supabase stop",
-    "db:reset": "supabase db reset",
-    "db:push": "supabase db push",
-    "types:db": "supabase gen types typescript --local > src/lib/supabase/database.types.ts"
+    "verify:cloud": "node --env-file-if-exists=.env.local scripts/verify-deployment.mts",
+    "build:sql": "node scripts/build-setup-sql.mts",
+    "db:link": "supabase link",
+    "db:diff": "supabase db push --linked --dry-run",
+    "db:status": "supabase migration list --linked",
+    "db:push": "cat supabase/.temp/project-ref && supabase db push --linked",
+    "config:push": "node --env-file-if-exists=.env.local ./node_modules/.bin/supabase config push",
+    "buckets:push": "node --env-file-if-exists=.env.local ./node_modules/.bin/supabase seed buckets",
+    "types:db": "supabase gen types typescript --linked > src/lib/supabase/database.types.ts.tmp && mv src/lib/supabase/database.types.ts.tmp src/lib/supabase/database.types.ts || (rm -f src/lib/supabase/database.types.ts.tmp; exit 1)"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.6",
@@ -22,6 +26,7 @@
     "fflate": "^0.8.3",
     "mammoth": "^1.12.2",
     "next": "16.3.4",
+    "nodemailer": "^10.0.0",
     "openai": "^7.10.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -32,6 +37,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^24.13.3",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",

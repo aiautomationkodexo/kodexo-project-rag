@@ -208,6 +208,7 @@ export type Database = {
           id: string
           is_active: boolean
           is_super_admin: boolean
+          last_magic_link_at: string | null
           name: string | null
           updated_at: string
         }
@@ -218,6 +219,7 @@ export type Database = {
           id: string
           is_active?: boolean
           is_super_admin?: boolean
+          last_magic_link_at?: string | null
           name?: string | null
           updated_at?: string
         }
@@ -228,6 +230,7 @@ export type Database = {
           id?: string
           is_active?: boolean
           is_super_admin?: boolean
+          last_magic_link_at?: string | null
           name?: string | null
           updated_at?: string
         }

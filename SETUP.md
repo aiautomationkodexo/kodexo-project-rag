@@ -5,101 +5,286 @@ Everything the code cannot do for itself. Work top to bottom.
 ## 0. Prerequisites
 
 - Node 22+ (this repo is developed on Node 24; the OpenAI SDK requires 22 LTS minimum)
-- Docker, for the local Supabase stack
-- A Supabase project (for deployment) and an OpenAI API key
+- A Supabase **cloud** project and an OpenAI API key
+- A Google account that can issue an **App Password** (see §3)
+
+No Docker. This project is cloud-only: there is no local Supabase stack, and
+`db:start` / `db:stop` / `db:reset` no longer exist. There is one database and it
+is the real one — which is why `db:push`, `config:push` and `seed:admin` all name
+their target before they touch it.
+
+The Supabase CLI is a devDependency, not a global install, so every command below
+works from a clean `npm install` with no extra tooling.
 
 ```bash
 npm install
 cp .env.example .env.local
+npx supabase login          # or export SUPABASE_ACCESS_TOKEN
 ```
 
 ---
 
-## 1. Local development (no cloud project, no API keys needed for most of it)
+## 1. Cutover runbook
+
+Order matters. `seed:admin` calls `has_claim()`, so it cannot run before the schema
+is pushed.
+
+### 1.1 Create the project
+
+Create a **new** project in the Supabase dashboard. Do not reuse an existing one.
+
+- **Postgres 17**, to match `[db] major_version` in `supabase/config.toml`.
+- **Asymmetric JWT signing keys** (Settings → API → JWT Keys). `src/lib/supabase/proxy.ts`
+  calls `getClaims()`, which verifies locally against a cached JWKS *only* with
+  asymmetric keys. On legacy HS256 it silently degrades to a network call on every
+  request through the proxy matcher, including prefetches — which defeats the whole
+  reason the proxy is designed the way it is.
+- A fresh project also ships `vector` *available but not enabled*, which is what
+  lets migration `0001` install it into the `extensions` schema. On a reused project
+  `vector` may already exist in `public`, and then `create extension if not exists`
+  silently no-ops and every `extensions.vector` reference in `0001` and `0005`
+  breaks. This is the main reason not to reuse a project.
+
+### 1.2 Fill in `.env.local`
+
+Every key in `.env.example`. `NEXT_PUBLIC_SUPABASE_URL`, the publishable key and the
+secret key come from Settings → API.
+
+### 1.3 Point `supabase/config.toml` at production
+
+**Two values must be changed before the first `config:push`** — they are marked with
+a box comment in the file:
+
+- `[auth] site_url` — the deployment origin, no trailing slash. It must byte-match
+  `NEXT_PUBLIC_SITE_URL`.
+- `[auth] additional_redirect_urls` — the production origin with a `/**` glob.
+
+Pushing the shipped `127.0.0.1` values would set *production's* Site URL to
+localhost, and because Supabase silently substitutes Site URL for any redirect that
+is not allow-listed, every magic link would then point at localhost with no error
+anywhere.
+
+### 1.4 Two ways to apply the schema
+
+**A — `supabase/setup.sql` (portable, no CLI, no DB password).** One file, run in
+Dashboard → SQL Editor. Use it when standing up a brand-new project or **moving to
+a different Supabase account**. It contains all seven migrations plus the super
+admin, and the SQL editor runs as `postgres`, which is the privilege level the
+storage and publication statements want.
+
+It is **generated** — `npm run build:sql` concatenates `supabase/migrations/*.sql`
+then `supabase/seed/*.sql`. Never edit `setup.sql` by hand; edit the migration and
+regenerate, or the next build silently discards your change. The generator refuses
+to write if either directory is empty, so a truncated file cannot be produced by
+accident.
+
+It is for a **fresh, empty project**. Re-running it against a populated database
+stops at the first `create table` with "relation already exists" and changes
+nothing — a safety feature, not a limitation. To re-assert only the super admin, or
+to point it at a different person, run `supabase/seed/0100_super_admin.sql` on its
+own; that file *is* idempotent and its two editable values are at the top.
+
+**B — the CLI (normal path for an already-linked project).**
+
+### 1.5 Link and push
 
 ```bash
-npm run db:start     # Postgres + pgvector + Auth + Realtime + Storage in Docker
-npm run db:reset     # applies supabase/migrations/0001..0005 from scratch
-npm run types:db     # regenerates src/lib/supabase/database.types.ts
+npm run db:link                 # writes supabase/.temp/project-ref
+npm run db:diff                 # dry run — read what it intends to apply
+npm run db:status               # confirm the 0001..0007 names parse
+npm run db:push                 # prints the target ref first
 ```
 
-`supabase/config.toml` is already configured for this app: signups disabled, 900s OTP expiry, both
-`127.0.0.1` and `localhost` origins allow-listed, and the magic-link template pointed at
-`supabase/templates/magic_link.html` (the `token_hash` form). You should not need to touch it.
-
-`npm run db:start` prints an API URL, a publishable key and a secret key. Put them in `.env.local`:
-
-```
-NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<publishable key from db:start>
-SUPABASE_SECRET_KEY=<secret/service_role key from db:start>
-NEXT_PUBLIC_SITE_URL=http://127.0.0.1:3000
-INTERNAL_BASE_URL=http://127.0.0.1:3000
-INTERNAL_SECRET=<openssl rand -hex 32>
-SUPER_ADMIN_EMAIL=you@kodexolabs.com
-SUPER_ADMIN_NAME=Your Name
-OPENAI_API_KEY=<required for search and summaries>
-```
-
-Then:
+**Watch for `WARNING: 0004: …` lines.** Migration `0004` fails *soft* by design:
+`db push` stops at the first error, so an unguarded failure there would leave `0005`
+(search), `0006` (soft delete) and `0007` (the privilege lockdown) unapplied — and an
+unapplied `0007` means the profiles privilege-escalation hole is live. Each block in
+`0004` therefore downgrades a privilege error to a warning. **That makes the
+verification in §2 mandatory, not optional.**
 
 ```bash
-npm run seed:admin   # creates the super admin, asserts has_claim(...) === true
-npm run dev
+npm run config:push             # auth settings, SMTP, redirect list, magic-link template
+npm run buckets:push            # only if §2 shows the bucket missing
+npm run types:db
+npm run seed:admin -- <project-ref>
+npm run seed:admin -- <project-ref>    # twice: idempotency is PRD §14 T2
 ```
 
-**Local mail.** `db:start` includes Inbucket, a mail catcher — magic links appear there instead of a real inbox. The URL is in the `db:start` output (usually <http://127.0.0.1:54324>). This is what makes the whole auth flow testable with no Resend account.
+`config:push` and `buckets:push` deliberately shell the CLI through
+`node --env-file-if-exists=.env.local`, because `env(SMTP_PASSWORD)` in
+`config.toml` is resolved from the **process** environment at push time. Running the
+bare CLI instead would write an *empty* SMTP password to the project.
 
-> **Use `127.0.0.1` everywhere locally, never `localhost`.** Supabase compares redirect origins as
-> strings, so `http://localhost:3000/auth/confirm` does not match a `127.0.0.1` allow-list entry —
-> Supabase then silently falls back to Site URL and the magic link lands on `/` instead of
-> `/auth/confirm`. Separately, `INTERNAL_BASE_URL` must be `127.0.0.1`, not `localhost`. Node resolves `localhost` to `::1` while `next dev` binds `0.0.0.0`, so the pipeline's self-call would get `ECONNREFUSED`.
+`seed:admin` refuses to run unless you name the project ref, and prints the target
+first. It is also the **break-glass path**: `0007` makes `is_super_admin` unwritable
+through the API, and `getCurrentUser()` signs out a super admin who deactivates
+themselves — if that happens, this script is the only way back in. That is why its
+upsert force-resets `is_active` / `deleted_at` / `is_super_admin`.
 
 ---
 
-## 2. Supabase dashboard (cloud project)
+## 2. Verify the push
 
-Local development needs none of this. Deployment needs all of it.
+Run these in the dashboard SQL editor. Do **not** infer success from the exit code —
+`0004` is designed to succeed with work skipped.
 
-**Auth → Providers → Email**
-- Disable sign-ups. Accounts are created by an admin only; `signInWithOtp` passes `shouldCreateUser: false`, and this closes the loop at the provider.
-- OTP expiry: 900 seconds.
+```sql
+-- all seven recorded
+select version from supabase_migrations.schema_migrations order by version;
 
-**Auth → URL Configuration**
-- Site URL: your exact origin, no trailing slash.
-- Redirect URLs — add **both**:
-  - `{SITE_URL}/auth/confirm` ← the one that matters
-  - `{SITE_URL}/auth/callback` ← fallback for an unedited email template
+-- vector must be in `extensions`, not `public`
+select e.extname, n.nspname from pg_extension e
+join pg_namespace n on n.oid = e.extnamespace where e.extname = 'vector';
 
-**Auth → Email Templates → Magic Link** — replace the body link with:
+-- 0005 landed with the right signature
+select p.oid::regprocedure from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'search_projects';
+
+-- 0002: RLS actually on (the PRD shipped this off)
+select relname, relrowsecurity from pg_class
+where relnamespace = 'public'::regnamespace and relkind = 'r' order by 1;
+
+-- 0004a: bucket. Expect: false | 52428800 | 11
+select public, file_size_limit, array_length(allowed_mime_types, 1)
+from storage.buckets where id = 'project-files';
+
+-- 0004b: storage policies. Absence is TOLERABLE — see below.
+select policyname, cmd from pg_policies
+where schemaname = 'storage' and tablename = 'objects';
+
+-- 0004c: realtime. Absence is NOT tolerable.
+select tablename from pg_publication_tables
+where pubname = 'supabase_realtime' order by 1;
+
+-- 0007: expect EXACTLY name, is_active, deleted_at
+select column_name from information_schema.column_privileges
+where table_schema='public' and table_name='profiles'
+  and grantee='authenticated' and privilege_type='UPDATE' order by 1;
+```
+
+**Why the storage policies are tolerable and Realtime is not.** Every Storage call in
+this app runs through the service-role client and bypasses RLS —
+`/api/upload-url` mints a signed upload URL (that URL's own token is the browser's
+authorisation) and `lib/pipeline/extract.ts` downloads as admin. Nothing touches
+`storage.objects` as `authenticated`, so those three policies are defence-in-depth
+for a user-scoped path that does not exist yet. Realtime is the opposite: without the
+publication, the live status panel on `/projects/[id]` silently never updates.
+
+If `0007`'s query returns `is_super_admin`, **stop** — the privilege escalation is
+live. Re-run `0007` from the SQL editor.
+
+Then check the dashboard reflects `config:push`: Site URL byte-matches
+`NEXT_PUBLIC_SITE_URL`; sign-ups disabled; OTP expiry 900; Email Templates → Magic
+Link shows the `token_hash` markup; and **SMTP shows a real username and a non-empty
+password** — if the username reads literally `env(SMTP_USER)`, the CLI did not
+substitute it and those fields must be set in the dashboard by hand.
+
+---
+
+## 3. Email (Google SMTP + App Password)
+
+**Deviation from PRD §1, which specifies Resend.** Resend cannot deliver to any
+address but the account owner's until a sending domain is verified with SPF/DKIM,
+and we have no DNS access — on Resend, every user except one would be unable to sign
+in. Google delivers to any recipient immediately.
+
+**The app sends its own mail — including magic links.** GoTrue's mailer is rate
+limited on two axes (a per-address resend interval and an hourly cap) and both are
+low enough to interrupt ordinary use. `src/lib/auth/magic-link.ts` mints the token
+with `auth.admin.generateLink()`, which sends nothing and is not rate limited, and
+delivers it over the same nodemailer transport as the completion email.
+
+| | Sent by | Configured in |
+|---|---|---|
+| Magic links | **this app**, via nodemailer | `SMTP_*` / `EMAIL_FROM` |
+| "Project is ready" | this app, via nodemailer | `SMTP_*` / `EMAIL_FROM` |
+| Recovery / email-change (unused) | GoTrue fallback | `config.toml` `[auth.email.smtp]` |
+
+Two consequences worth knowing:
+
+- **`generateLink` creates the user if the address is unknown** — there is no
+  `shouldCreateUser` option. The active-profile lookup at the top of
+  `issueMagicLink` is what keeps `/login` from being an open mail relay, and it
+  must stay first.
+- **We own the resend throttle now.** `RESEND_INTERVAL_MS` (60s) backed by
+  `profiles.last_magic_link_at` replaces GoTrue's. Supabase's
+  `[auth.rate_limit] email_sent` no longer governs sign-in.
+
+Prerequisites, each of which can block you:
+
+- **2-Step Verification must be on** to create an App Password, and a Google
+  Workspace admin can disable App Passwords org-wide. If they are blocked, the
+  fallback is Workspace SMTP relay (`smtp-relay.gmail.com`), which needs admin
+  configuration.
+- **Google rewrites the `From` header** to the authenticated account, so `EMAIL_FROM`
+  must be `SMTP_USER` or a verified "Send mail as" alias on it. You cannot send as
+  `noreply@kodexolabs.com` without configuring that alias first.
+- **This ties sign-in to one mailbox.** The App Password dies when that account's
+  password rotates or the person leaves. Prefer a shared/service account.
+
+**Two ceilings, not one.** Google allows ~500 messages/day on a personal account and
+~2,000/day on Workspace. Separately, Supabase throttles custom SMTP to 30/hour by
+default; `[auth.rate_limit] email_sent` raises that ceiling and is pushed with
+`config:push`.
+
+`SMTP_*` unset is a **valid** state: the completion email logs a warning and no-ops,
+and the project still finalizes (§15.9). Magic links, however, fall back to
+Supabase's built-in sender at ~2/hour, which is unusable.
+
+---
+
+## 4. What is still manual in the dashboard
+
+`npm run config:push` applies almost everything that used to be a click-list here:
+sign-ups disabled, 900s OTP expiry, Site URL, the redirect allow-list, the
+magic-link template body, SMTP, and the email rate limit. `supabase/config.toml` and
+`supabase/templates/magic_link.html` are the source of truth for all of it — they are
+production artifacts now, not local-dev files, so a change there is reviewable and
+replayable in a way a dashboard click never was.
+
+What genuinely remains manual:
+
+- **Create the project**, pick a region, confirm Postgres 17 and asymmetric JWT keys (§1.1).
+- **Storage → Settings**: confirm the *global* file size limit is ≥ 50 MB. The bucket
+  row from `0004` sets a per-bucket limit, but the platform limit caps it — get this
+  wrong and 50 MB uploads fail while the bucket looks perfectly correct.
+- **Anything §2's verification shows as skipped**, which for `0004` means running the
+  affected block from the SQL editor.
+
+**Do not hand-edit the magic-link template.** It must stay:
 
 ```html
 <p><a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=magiclink">Sign in</a></p>
 ```
 
-This is not cosmetic. `@supabase/ssr` defaults to PKCE, and PKCE binds its code verifier to the device that *requested* the link. People request on a laptop and click in webmail on a phone, and corporate mail scanners pre-fetch URLs — both fail the default `?code=` exchange with an error that surfaces as "expired link" for a perfectly valid link. `token_hash` + `verifyOtp` has no device binding.
-
-**Auth → SMTP** — Resend, via their Supabase integration (it fills in the settings and creates the key). Verify SPF/DKIM on the sending domain.
-
-> Supabase throttles custom SMTP to **30 messages/hour** by default. Raise it in Auth → Rate Limits or sign-ins will silently start failing.
-
-**JWT signing keys** — the proxy uses `getClaims()`, which verifies locally against a cached JWKS when the project uses asymmetric signing keys. That is the default for new projects. On an older project, migrate to asymmetric keys or `getClaims()` falls back to a network call per request.
-
-**Storage / Realtime** — nothing to click. Migration `0004` creates the `project-files` bucket, its policies, and the Realtime publication.
+This is not cosmetic. `@supabase/ssr` defaults to PKCE, and PKCE binds its code
+verifier to the device that *requested* the link. People request on a laptop and
+click in webmail on a phone, and corporate mail scanners pre-fetch URLs — both fail
+the default `?code=` exchange with an error that surfaces as "expired link" for a
+perfectly valid link. `token_hash` + `verifyOtp` has no device binding. Deleting
+`supabase/templates/magic_link.html` makes GoTrue return a 500 on every sign-in,
+which `sendMagicLink` logs but cannot surface to the user.
 
 ---
 
-## 3. Vercel
+## 5. Vercel
 
 - **Plan: Pro is required**, not optional. `vercel.json` schedules the sweep every 5 minutes and Hobby allows only daily crons — the deployment fails otherwise.
 - **Enable Fluid Compute.** `maxDuration = 800` on the processing routes only takes effect with it; the platform default is 300s. On by default for new projects.
 - **Raise function memory to 4 GB** (default 2 GB) before T6 lands — document extraction peaks at several times the file size.
 - Set every variable from `.env.example`. `CRON_SECRET` is provided automatically.
-- Set `INTERNAL_BASE_URL` to the deployment origin.
+- **`NEXT_PUBLIC_SITE_URL` is inlined at BUILD time**, so it must be set for the
+  environment that *builds*, not only the one that runs. Unset, it now throws rather
+  than silently defaulting to localhost.
+- `INTERNAL_BASE_URL` falls back to `NEXT_PUBLIC_SITE_URL` and then `VERCEL_URL`. Set
+  it explicitly if Deployment Protection is on — a self-call to `VERCEL_URL` is then
+  answered by a 401 login page instead of the route, and the pipeline would stall
+  with every document stuck in `queued`.
 
 ---
 
-## 4. Verifying the build
+## 6. Verifying the build
 
 ```bash
 npm run typecheck    # next typegen && tsc --noEmit
@@ -112,9 +297,20 @@ Acceptance criteria per PRD §14:
 | Task | Criterion | How |
 |---|---|---|
 | T1 | dev serves, typecheck clean | `npm run dev`, `npm run typecheck` |
-| T2 | migrations apply; seed idempotent; `has_claim` true | `npm run db:reset && npm run seed:admin && npm run seed:admin` |
-| T3 | magic link signs in; signed-out redirects; deactivation forces logout | Inbucket; then `update profiles set is_active=false` and navigate |
-| T4 | 200+ char description reaches `ready` and is findable by a semantically-related search sharing no exact words | Needs `OPENAI_API_KEY` |
+| T2 | migrations apply; seed idempotent; `has_claim` true | §1.4, then §2's queries |
+| T3 | magic link signs in; signed-out redirects; deactivation forces logout | Real inbox; then `update profiles set is_active=false` and navigate |
+| T4 | 200+ char description reaches `ready` and is findable by a semantically-related search sharing no exact words | Needs `OPENAI_API_KEY`. The real end-to-end proof — exercises Realtime, the dispatch fan-out, OpenAI and `search_projects` at once |
+| T6 | a 5-file project processes in parallel; one corrupt file is `failed` while the rest complete and the project still finalizes | Confirms the bucket, its policies and the platform size limit |
+
+Mail-specific checks:
+
+| What | How | Expect |
+|---|---|---|
+| Magic link lands correctly | open the link | `/auth/confirm`, **not** `/`. Landing on `/` means the allow-list does not byte-match `NEXT_PUBLIC_SITE_URL` and the `login/page.tsx` safety net is covering for it |
+| Not PKCE-bound | open the link on a **different device** | signs in; "expired" means the template did not push |
+| Completion email | create a project, wait for `ready` | one email, link resolves to the production origin |
+| §15.9 holds without mail | blank `SMTP_PASSWORD`, create a project | still reaches `ready`, one `[email]` warning, **no** `[finalize]` error |
+| §15.9 holds on a mail failure | `SMTP_HOST=127.0.0.1 SMTP_PORT=59999`, create a project | still reaches `ready`, `[email] send failed … ECONNREFUSED`, **no** `[finalize]` error |
 
 To test deactivation:
 
@@ -125,7 +321,7 @@ Then navigate anywhere — the next request routes through `/auth/signout?reason
 
 ---
 
-## 5. Pipeline modes
+## 7. Pipeline modes
 
 `PIPELINE_MODE=http` (default) fans out one function invocation per document, each with its own 800s budget and memory.
 

@@ -22,7 +22,11 @@ const nextConfig: NextConfig = {
 
   // Pre-wired for T6 document extraction. Listing a package that isn't
   // installed yet is a no-op, so this doesn't need touching at T6.
-  serverExternalPackages: ["unpdf", "mammoth"],
+  //
+  // nodemailer is here because it is a CommonJS package that opens raw TCP
+  // sockets; bundling it breaks its dynamic requires. It must stay on the Node
+  // runtime — never import lib/email from anything that runs on Edge.
+  serverExternalPackages: ["unpdf", "mammoth", "nodemailer"],
 
   // Deliberately NOT set:
   //   cacheComponents — every authed route is force-dynamic; enabling it would

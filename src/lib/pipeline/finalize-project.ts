@@ -9,6 +9,10 @@ import {
 } from "@/lib/ai/openai";
 import { asSummary, type Summary } from "@/lib/types";
 import { toVectorOrNull } from "@/lib/supabase/vector";
+import {
+  notifyProjectReady,
+  type FinalizeOutcome,
+} from "@/lib/email/project-ready";
 
 /** Alias key normalisation, matching migration 0003's derivation exactly. */
 function aliasKey(name: string): string {
@@ -36,11 +40,34 @@ export async function maybeFinalize(projectId: string): Promise<boolean> {
   });
   if (!won) return false;
 
-  await finalizeProject(projectId);
+  const outcome = await finalizeProject(projectId);
+
+  // ── Completion email (PRD §10) ──────────────────────────────────────────
+  // Dispatched HERE, not inside finalizeProject, and that separation is the
+  // entire point. §15.9 ("finalizing is ALWAYS escaped") lives inside that
+  // function's try/catch; this call sits outside it and is unreachable from
+  // it, so no future edit to the mail path can flip a successful finalize into
+  // the error branch. notifyProjectReady is total — it never throws — which is
+  // belt to this braces.
+  //
+  // Awaited, not fire-and-forget: a serverless invocation can freeze the moment
+  // its handler returns, and a detached promise is simply lost. NOT wrapped in
+  // after() either — this already runs inside the after() registered by
+  // /api/process/[documentId], and nesting is unsupported.
+  if (outcome !== "error") {
+    await notifyProjectReady(projectId, outcome);
+  }
   return true;
 }
 
-export async function finalizeProject(projectId: string): Promise<void> {
+/**
+ * Returns what it did, so maybeFinalize can decide whether to mail. The only
+ * edits this adds inside the try/catch are `return` statements, which cannot
+ * throw and so cannot disturb §15.9.
+ */
+export async function finalizeProject(
+  projectId: string,
+): Promise<FinalizeOutcome> {
   const admin = createAdminClient();
 
   try {
@@ -50,7 +77,7 @@ export async function finalizeProject(projectId: string): Promise<void> {
       .eq("id", projectId)
       .maybeSingle();
 
-    if (!project) return;
+    if (!project) return "error";
 
     const { data: documents } = await admin
       .from("documents")
@@ -66,7 +93,7 @@ export async function finalizeProject(projectId: string): Promise<void> {
         .from("projects")
         .update({ status: "ready" })
         .eq("id", projectId);
-      return;
+      return "empty";
     }
 
     const existing: Summary | null = asSummary(project.summary);
@@ -148,6 +175,8 @@ export async function finalizeProject(projectId: string): Promise<void> {
         status: "ready",
       })
       .eq("id", projectId);
+
+    return "summarized";
   } catch (error) {
     // §15.9: 'finalizing' is ALWAYS escaped. Every error path forces 'ready',
     // or the project is stranded in a status the UI shows as in-progress
@@ -157,6 +186,8 @@ export async function finalizeProject(projectId: string): Promise<void> {
       .from("projects")
       .update({ status: "ready" })
       .eq("id", projectId);
+
+    return "error";
   }
 }
 

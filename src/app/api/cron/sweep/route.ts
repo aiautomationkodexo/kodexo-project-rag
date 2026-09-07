@@ -28,11 +28,17 @@ export async function GET(request: NextRequest) {
     older_than_minutes: 15,
   });
 
+  // Hoisted out of the loop's try for the same reason as dispatch.ts: that
+  // catch is deliberately swallowing, so a config error read inside it would be
+  // logged and discarded and the sweep would silently do nothing forever.
+  const baseUrl = serverEnv.internalBaseUrl;
+  const internalSecret = serverEnv.internalSecret;
+
   for (const doc of stuck ?? []) {
     try {
-      await fetch(`${serverEnv.internalBaseUrl}/api/process/${doc.id}`, {
+      await fetch(`${baseUrl}/api/process/${doc.id}`, {
         method: "POST",
-        headers: { "x-internal": serverEnv.internalSecret },
+        headers: { "x-internal": internalSecret },
       });
     } catch (error) {
       console.error(`[sweep:process] ${doc.id}:`, error);
