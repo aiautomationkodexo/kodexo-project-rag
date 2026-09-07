@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { aliasKey } from "@/lib/tags/alias-key";
 import {
   embedBatch,
   extractMetadata,
@@ -13,11 +14,6 @@ import {
   notifyProjectReady,
   type FinalizeOutcome,
 } from "@/lib/email/project-ready";
-
-/** Alias key normalisation, matching migration 0003's derivation exactly. */
-function aliasKey(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
 
 /**
  * §15.6: THE ONLY finalization gate.
@@ -232,9 +228,20 @@ async function resolveTags(
 
     if (created) {
       resolved.push(created.id);
+      // ignoreDuplicates is NOT optional here. Without it PostgREST sends
+      // ON CONFLICT DO UPDATE, which STEALS the alias from whatever tag
+      // already owns it — orphaning that tag, and able to silently undo a
+      // committed merge (0011) if this finalize read the alias table before
+      // the merge and writes after it. DO NOTHING is the only safe form.
+      //
+      // The row is redundant anyway since 0011's tech_tags_self_alias trigger,
+      // which is belt to this braces.
       await admin
         .from("tech_tag_aliases")
-        .upsert({ alias: aliasKey(name), tech_tag_id: created.id }, { onConflict: "alias" });
+        .upsert(
+          { alias: aliasKey(name), tech_tag_id: created.id },
+          { onConflict: "alias", ignoreDuplicates: true },
+        );
     }
   }
 

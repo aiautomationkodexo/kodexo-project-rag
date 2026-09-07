@@ -89,6 +89,7 @@ export function LiveStatus({
                   {
                     id: rowId,
                     filename: row.filename ?? "document",
+                    mime: row.mime ?? "",
                     doc_role: row.doc_role ?? null,
                     status: row.status ?? "queued",
                     error: row.error ?? null,

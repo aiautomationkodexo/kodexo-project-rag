@@ -2,7 +2,6 @@ import { notFound } from "next/navigation";
 import { AppShell } from "@/components/chrome/app-shell";
 import { PageHeader } from "@/components/chrome/page-header";
 import { Chip } from "@/components/ui/chip";
-import { Callout } from "@/components/ui/callout";
 import { requireClaim } from "@/lib/auth/claims";
 import { can } from "@/lib/auth/claim-set";
 import { getUser, countActiveSuperAdmins } from "@/lib/users/queries";
@@ -47,16 +46,6 @@ export default async function UserPage(props: PageProps<"/users/[id]">) {
         }
       />
 
-      {isLastSuperAdmin ? (
-        <Callout variant="info" label="Last super admin" className="mb-section">
-          <p className="mb-0">
-            This is the only active super admin, so the database will refuse to
-            deactivate or delete it. Promote another account first — via the
-            seed script — if you need to retire this one.
-          </p>
-        </Callout>
-      ) : null}
-
       <section className="mb-section">
         <h2 className="rule-hair mb-panel-y pb-[5px] font-display text-subhead font-bold">
           Details
@@ -84,6 +73,7 @@ export default async function UserPage(props: PageProps<"/users/[id]">) {
           initial={[...claims]}
           isSuperAdmin={profile.is_super_admin}
           canEdit={canUpdate}
+          isSelf={isSelf}
         />
       </section>
 
@@ -94,6 +84,7 @@ export default async function UserPage(props: PageProps<"/users/[id]">) {
         canUpdate={canUpdate}
         canDelete={canDelete}
         isSelf={isSelf}
+        isLastSuperAdmin={isLastSuperAdmin}
       />
 
       <footer className="mt-section border-t border-n200 pt-panel-y">

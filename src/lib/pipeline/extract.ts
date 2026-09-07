@@ -3,6 +3,11 @@ import "server-only";
 import { unzipSync, strFromU8 } from "fflate";
 import { XMLParser } from "fast-xml-parser";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  DeepgramError,
+  TRANSCRIBE_TIMEOUT_MS,
+  transcribe,
+} from "@/lib/ai/deepgram";
 
 /**
  * Text extraction by MIME type (PRD §10).
@@ -54,11 +59,11 @@ export async function extractText(doc: ExtractableDocument): Promise<string> {
   const mime = doc.mime.toLowerCase();
 
   // Audio and video are handled WITHOUT downloading — Deepgram is handed a
-  // signed URL and fetches the bytes itself (PRD §10). Landing here means T7.
+  // signed URL and fetches the bytes itself (PRD §10). This branch sits ABOVE
+  // download() on purpose: media is capped at 200 MB, and buffering that here
+  // would blow the invocation's memory to build something nothing reads.
   if (mime.startsWith("audio/") || mime.startsWith("video/")) {
-    throw new PermanentExtractionError(
-      "Audio and video transcription is not available yet.",
-    );
+    return transcribeStored(doc.storage_key);
   }
 
   const buffer = await download(doc.storage_key);
@@ -78,6 +83,77 @@ export async function extractText(doc: ExtractableDocument): Promise<string> {
 
     default:
       throw new PermanentExtractionError(`Unsupported type: ${doc.mime}`);
+  }
+}
+
+/**
+ * Deepgram FETCHES the object itself, so this URL must outlive the entire
+ * transcription, not merely the POST that hands it over.
+ *
+ * DERIVED from the timeout rather than written as a literal, so the invariant
+ * "the URL outlives the call" cannot be broken by editing one number. If the
+ * URL expires mid-transcription Deepgram reports it as a 400 — one string match
+ * away from being classified PERMANENT and failing a perfectly good recording.
+ *
+ * 3x gives headroom for clock skew against Storage's validator and for Deepgram
+ * retrying its own fetch, while keeping the life of what is, after all, a
+ * bearer credential for the raw file short. Currently 1800s against a 600s
+ * timeout.
+ */
+const SIGNED_URL_TTL_SECONDS = Math.ceil((TRANSCRIBE_TIMEOUT_MS / 1000) * 3);
+
+/**
+ * The FIRST createSignedUrl in this codebase. /api/upload-url mints
+ * createSignedUploadUrl, which is a different thing — a one-shot WRITE grant.
+ * This is a time-boxed READ grant, and `data.signedUrl` is absolute (it carries
+ * the project's storage origin), which is what makes it usable by a third party.
+ */
+async function signedUrl(storageKey: string): Promise<string> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage
+    .from(BUCKET)
+    .createSignedUrl(storageKey, SIGNED_URL_TTL_SECONDS);
+
+  // Plain Error, i.e. TRANSIENT — deliberately symmetric with download() below,
+  // which also treats a missing object as retryable rather than as a verdict on
+  // the file. Do not diverge the two without changing both.
+  if (error || !data?.signedUrl) {
+    throw new Error(
+      `Could not sign the stored file: ${error?.message ?? "not found"}`,
+    );
+  }
+  return data.signedUrl;
+}
+
+/**
+ * THE SINGLE TRANSLATION POINT between Deepgram's wire taxonomy and the
+ * pipeline's. Keeping the mapping here is what lets ai/deepgram.ts stay free of
+ * a pipeline import — this file already imports it, and the pair would be a
+ * cycle.
+ *
+ * The URL is minted inside the retried unit, not cached on the row, so every
+ * pipeline attempt gets a fresh one. That is what makes an expired-URL failure
+ * self-healing rather than sticky.
+ */
+async function transcribeStored(storageKey: string): Promise<string> {
+  const url = await signedUrl(storageKey);
+  try {
+    return await transcribe(url);
+  } catch (error) {
+    if (error instanceof DeepgramError) {
+      // An auth/billing failure is classified TRANSIENT (see isPermanent), so
+      // the document message will blame the transcription service generically.
+      // Name the real cause here or a bad DEEPGRAM_API_KEY looks like a
+      // Deepgram outage for as long as it takes someone to read the logs.
+      if (error.status === 401 || error.status === 402 || error.status === 403) {
+        console.error(
+          `[deepgram] ${error.status} — check DEEPGRAM_API_KEY and the account's plan/credit. ` +
+            `Documents will retry and then fail; the file is not the problem.`,
+        );
+      }
+      if (error.permanent) throw new PermanentExtractionError(error.message);
+    }
+    throw error;
   }
 }
 

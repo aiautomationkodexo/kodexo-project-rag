@@ -40,7 +40,7 @@
 --   • Storage → Settings global file size limit (caps the bucket's 50 MB)
 --   • Asymmetric JWT signing keys
 --
--- Sections: 0001_schema.sql, 0002_rls.sql, 0003_taxonomy.sql, 0004_storage_realtime.sql, 0005_rpc.sql, 0006_soft_delete.sql, 0007_privilege_lockdown.sql, 0008_magic_link_throttle.sql, 0100_super_admin.sql
+-- Sections: 0001_schema.sql, 0002_rls.sql, 0003_taxonomy.sql, 0004_storage_realtime.sql, 0005_rpc.sql, 0006_soft_delete.sql, 0007_privilege_lockdown.sql, 0008_magic_link_throttle.sql, 0009_sweep_recovery.sql, 0010_media_size_cap.sql, 0011_tag_admin.sql, 0100_super_admin.sql
 -- ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -929,6 +929,19 @@ $$;
 -- processing a document that a slow-but-alive invocation still holds.
 --
 -- Returns true only if THIS caller won the right to process the document.
+--
+-- TIMING INVARIANT — the 15 minutes below is the third term in:
+--
+--   TRANSCRIBE_TIMEOUT_MS (600s)  <  maxDuration (800s)  <  reclaim (900s)
+--
+-- The reclaim window MUST stay above the route's maxDuration, or a still-living
+-- invocation's document becomes claimable and a second worker starts on it.
+-- Two workers then race `delete chunks where document_id` against their own
+-- inserts, which leaves a permanently duplicated chunk set — invisible except
+-- as duplicate search snippets and double-weighted retrieval.
+-- (0009's chunks_document_ordinal_idx makes that overlap fail loudly instead,
+-- but it is a backstop, not a licence to shorten this interval.)
+-- See src/app/api/process/[documentId]/route.ts and src/lib/ai/deepgram.ts.
 create or replace function claim_document(p_document uuid)
 returns boolean language plpgsql security definer
 set search_path = public, extensions, pg_temp as $$
@@ -1227,6 +1240,667 @@ alter table public.profiles
 comment on column public.profiles.last_magic_link_at is
   'Service-role only. Last magic-link email sent to this address; drives the '
   'resend throttle that replaced GoTrue''s, now that we send auth mail ourselves.';
+
+
+-- ═════════════════════════════════════════════════════════════════════════
+-- ▶ supabase/migrations/0009_sweep_recovery.sql
+-- ═════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 0009 — Sweep recovery + storage lifecycle
+--
+-- Three things the cron sweep (PRD §13) cannot express through PostgREST, plus
+-- one index that turns a silent corruption into a loud error.
+--
+-- ── DEFECT IN THE PRD (§13 step 3) ─────────────────────────────────────────
+--
+-- The PRD specifies deleting Storage objects "with no matching `documents`
+-- row", and justifies it with: "Supabase Storage does not cascade from Postgres
+-- deletes. Step 3 is required or deleted projects keep costing storage."
+--
+-- That rule does not do what that sentence says. `soft_delete_project`
+-- (0006) only sets `deleted_at`; the `documents` rows survive, and NOTHING in
+-- this codebase hard-deletes a project. So every object belonging to a deleted
+-- project still HAS a matching documents row, and the rule as written sweeps
+-- exactly none of them. Implemented literally, the leak it names stays open.
+--
+-- Two rules are needed, and they are different queries:
+--
+--   purgeable_projects  — soft-deleted past a retention window. The actual
+--                         leak. Keyed on projects.deleted_at, not on row
+--                         absence.
+--   (abandoned uploads) — object with no documents row. Real, but a much
+--                         narrower case: the user closed the tab between the
+--                         upload finishing and the server action inserting the
+--                         row. Driven from Storage, so it lives in the route,
+--                         not here.
+--
+-- ── DEFECT: a project can strand in 'processing' forever ───────────────────
+--
+-- `maybeFinalize` runs inside the calling route's `after()`. If that invocation
+-- dies before claim_finalize commits — killed at maxDuration, or the platform
+-- reclaiming a frozen instance — the document is 'done' but the project stays
+-- 'processing', and nothing retries it:
+--
+--   stuck_documents  selects DOCUMENTS; every one of them is already 'done'.
+--   sweep step 2     unstrands 'finalizing' projects; this one never got there.
+--
+-- The project shows "processing" in the UI forever with no error anywhere.
+-- Pre-existing, but near-unreachable while the longest document was a PDF. A
+-- 600-second transcription (T7) makes it reachable, so it gets a recovery path:
+-- stranded_projects feeds /api/finalize/{id}, which routes through
+-- claim_finalize — §15.6 holds, there is still exactly one gate.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── Chunk uniqueness ───────────────────────────────────────────────────────
+--
+-- NOT IN THE PRD. process_document does `delete chunks where document_id = ...`
+-- then inserts, which is correct for one worker and silently wrong for two: the
+-- interleaving B-deletes → A-inserts → B-inserts leaves a permanently duplicated
+-- chunk set. Nothing surfaces it. The document reads 'done', the UI shows
+-- nothing unusual, and the only symptom is duplicate search snippets and a
+-- project that is double-weighted in retrieval forever.
+--
+-- Two workers should be impossible — claim_document is the gate, and
+-- maxDuration (800s) < the reclaim window (900s) means the first invocation is
+-- always dead before the row becomes claimable again. This index is what makes
+-- that ordering FAIL LOUDLY if someone ever changes one of those numbers
+-- without the other: the overlap becomes a 23505 on the existing transient
+-- retry path instead of corruption nobody can see.
+--
+-- Existing duplicates are removed first, keeping the lowest id per (document,
+-- ordinal). If any exist they are already corruption; the index cannot be
+-- created while they remain.
+delete from chunks c
+using chunks keep
+where c.document_id = keep.document_id
+  and c.ordinal     = keep.ordinal
+  and c.id          > keep.id;
+
+create unique index if not exists chunks_document_ordinal_idx
+  on chunks (document_id, ordinal);
+
+-- ── Recovery: projects stranded in 'processing' ────────────────────────────
+--
+-- The mirror of claim_finalize's own pending count, and it must STAY a mirror:
+-- `is_active` is in that count (0005 FIX), so a project whose only outstanding
+-- document was deactivated is finalizable and belongs in this result.
+--
+-- PostgREST cannot express the `not exists`, which is why this is an RPC rather
+-- than a query in the route.
+--
+-- No `attempts` ceiling, unlike stuck_documents. Re-finalizing is idempotent —
+-- claim_finalize's conditional UPDATE means a project that already escaped
+-- returns false and does nothing — so there is no runaway to bound. The
+-- `limit` bounds the sweep's work per tick instead.
+create or replace function stranded_projects(older_than_minutes int default 15)
+returns table (id uuid)
+language sql stable security definer
+set search_path = public, extensions, pg_temp as $$
+  select p.id
+  from projects p
+  where p.status = 'processing'
+    and p.deleted_at is null
+    and p.updated_at < now() - (older_than_minutes || ' minutes')::interval
+    and not exists (
+      select 1 from documents d
+      where d.project_id = p.id
+        and d.is_active
+        and d.status in ('queued','processing'))
+  limit 50;
+$$;
+
+-- ── Storage lifecycle: soft-deleted projects past retention ────────────────
+--
+-- Returns the object keys to remove, NOT the projects. The caller needs keys
+-- for storage.remove() and document ids to null out storage_key afterwards, and
+-- returning both in one round trip keeps the route from re-querying.
+--
+-- Rows are deliberately NOT deleted, here or by the caller: projects.created_by
+-- / last_updated_by and the audit trail reference them, `raw_text` is §15.2's
+-- re-chunk and model-migration path, and the summary is the record of what the
+-- project WAS. Only the billable bytes go.
+--
+-- The 30-day default is the undelete grace period. It is a default rather than
+-- a hardcoded interval so it can be tuned from the caller without a migration.
+--
+-- `storage_key is not null` excludes both synthetic documents (which never had
+-- a file) and rows already purged by an earlier sweep — that second one is what
+-- makes this converge instead of re-listing the same project every 5 minutes
+-- forever.
+create or replace function purgeable_projects(
+  older_than_days int default 30,
+  match_limit int default 200
+)
+returns table (project_id uuid, document_id uuid, storage_key text)
+language sql stable security definer
+set search_path = public, extensions, pg_temp as $$
+  select d.project_id, d.id, d.storage_key
+  from documents d
+  join projects p on p.id = d.project_id
+  where p.deleted_at is not null
+    and p.deleted_at < now() - (older_than_days || ' days')::interval
+    and d.storage_key is not null
+  limit match_limit;
+$$;
+
+-- ── Abandoned-upload support ───────────────────────────────────────────────
+--
+-- Step 5 of the sweep walks Storage prefixes, which only the route can do. It
+-- needs two things from Postgres: which projects are worth walking, and which
+-- document ids under a project are legitimate.
+--
+-- Scoped to RECENT projects on purpose. An abandoned object is always created
+-- within minutes of project activity — /api/upload-url mints the key during an
+-- upload the user was, at that moment, actually performing — so a 24h window
+-- catches essentially all of them while bounding a walk that would otherwise be
+-- O(every project) on a 5-minute cron.
+create or replace function recently_active_projects(
+  within_hours int default 24,
+  match_limit int default 20
+)
+returns table (id uuid)
+language sql stable security definer
+set search_path = public, extensions, pg_temp as $$
+  select p.id
+  from projects p
+  where p.updated_at > now() - (within_hours || ' hours')::interval
+  order by p.updated_at desc
+  limit match_limit;
+$$;
+
+-- ── Execute grants ─────────────────────────────────────────────────────────
+-- All four are sweep-only and read the whole table set without reference to
+-- auth.uid(). service_role exclusively; without the revoke, Postgres' default
+-- grant to PUBLIC would let any authenticated user enumerate deleted projects'
+-- storage keys.
+revoke execute on function stranded_projects(int), purgeable_projects(int, int),
+  recently_active_projects(int, int) from public;
+grant execute on function stranded_projects(int), purgeable_projects(int, int),
+  recently_active_projects(int, int) to service_role;
+
+
+-- ═════════════════════════════════════════════════════════════════════════
+-- ▶ supabase/migrations/0010_media_size_cap.sql
+-- ═════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 0010 — Raise the per-file ceiling to 200 MB for T7 (audio/video)
+--
+-- A 10-minute 1080p MP4 is routinely 80-150 MB and the user has no way to
+-- shrink one, so 0001's 50 MB ceiling made T7's own acceptance criterion
+-- ("a 10-minute MP4 transcribes") unreachable with a real recording.
+--
+-- Raising it is safe specifically because the media path never buffers:
+-- Deepgram is handed a signed Storage URL and fetches the bytes itself, so a
+-- 200 MB video never passes through a function. The 50 MB limit was bounding
+-- in-function parsing, and that argument does not apply here.
+--
+-- Raised HERE rather than by editing 0001 and 0004: both are recorded as
+-- applied, so an edit to either is a no-op on every existing project.
+--
+-- ── FLAT, NOT MIME-AWARE ───────────────────────────────────────────────────
+--
+-- The per-type rule (50 MB documents / 200 MB media) lives in
+-- src/lib/uploads/mime.ts, which is the only gate that runs BEFORE the bytes
+-- move — enforced in the dropzone and re-enforced in /api/upload-url.
+--
+-- A mime-aware CHECK here would look like enforcement and not be any:
+-- storage.buckets.file_size_limit is a single scalar and cannot express the
+-- rule at all, so Storage would accept a 200 MB PDF regardless. The CHECK would
+-- then reject the row AFTER 200 MB of bytes were already in the bucket,
+-- producing an orphaned object (Storage does not cascade from Postgres — that
+-- is what the sweep's step 4 exists for) plus a confusing action-level error.
+--
+-- And the value being checked is client-supplied: the create action JSON-parses
+-- `size` off the request body into size_bytes and nothing ever stats the stored
+-- object. This constraint is a sanity BOUND on a self-reported number, not the
+-- policy. Encoding policy in it would be a category error.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── documents.size_bytes ───────────────────────────────────────────────────
+--
+-- A CHECK cannot be altered in place; it must be dropped and re-added.
+--
+-- The constraint 0001 created was auto-named. Discovering it by DEFINITION
+-- rather than trusting the generated name makes this replay-safe against a
+-- database that was hand-patched at any point — and the loop is a no-op if it
+-- finds nothing, so a re-run cannot fail. The replacement is named EXPLICITLY
+-- so the next change to it is deterministic.
+do $$
+declare c text;
+begin
+  for c in
+    select conname from pg_constraint
+    where conrelid = 'public.documents'::regclass
+      and contype  = 'c'
+      and pg_get_constraintdef(oid) ilike '%size_bytes%'
+  loop
+    execute format('alter table public.documents drop constraint %I', c);
+  end loop;
+end $$;
+
+-- Validated against existing rows on ADD rather than NOT VALID: every existing
+-- row already satisfies a strictly wider bound, so the scan cannot fail and
+-- NOT VALID + VALIDATE would be ceremony.
+alter table public.documents
+  add constraint documents_size_bytes_check
+  check (size_bytes > 0 and size_bytes <= 209715200);
+
+-- ── Bucket ─────────────────────────────────────────────────────────────────
+--
+-- Restated rather than edited into 0004, for the reason in the banner.
+--
+-- Same soft-fail wrapper as 0004 and for the same reason: `db push` stops at
+-- the first error, so an unguarded privilege failure here would strand every
+-- later migration. Every block downgrades a privilege error to a warning, which
+-- is what makes SETUP.md's verification queries mandatory rather than optional.
+--
+-- ⚠ THE PLATFORM GLOBAL LIMIT CAPS THIS. Storage → Settings → global file size
+--   limit must be >= 200 MB, or the bucket silently clamps: this row reads
+--   209715200, `verify:cloud` passes, and 200 MB uploads still fail with an
+--   opaque Storage error.
+--
+-- ⚠ supabase/config.toml MUST be kept in step. `npm run buckets:push` writes
+--   that file through the Storage REST API and would put 50 MiB straight back
+--   over this. Both are set to 200MiB in the same change.
+do $$
+begin
+  update storage.buckets
+     set file_size_limit = 209715200
+   where id = 'project-files';
+exception
+  when insufficient_privilege then
+    raise warning
+      '0010: cannot update storage.buckets as %. Run: npm run buckets:push',
+      current_user;
+end $$;
+
+
+-- ═════════════════════════════════════════════════════════════════════════
+-- ▶ supabase/migrations/0011_tag_admin.sql
+-- ═════════════════════════════════════════════════════════════════════════
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 0011 — Tag approve / merge  (PRD §12 /admin/tags, T8)
+--
+-- Every finalize that meets an unrecognised technology name creates a tag with
+-- is_approved = false (finalize-project.ts resolveTags). Until now nothing
+-- could drain that queue, so the set only ever grew — and two spellings of one
+-- technology ("Vertex AI", "Google Vertex AI") became two tags that split every
+-- filtered search between them, permanently.
+--
+-- Five things, in dependency order:
+--
+--   1. tech_tag_alias_key(text) — the §7 normalisation rule, extracted. It has
+--      existed in TWO places since 0003 (0003:51 in SQL, `aliasKey` in
+--      src/lib/pipeline/finalize-project.ts in TS) with parity asserted only in
+--      a comment. This makes SQL the definition and adds a CHECK that turns TS
+--      drift into a loud 23514 instead of a silently unresolvable row.
+--
+--   2. A self-alias trigger, closing the window where resolveTags' two
+--      non-atomic PostgREST calls leave a tag with no alias at all.
+--
+--   3. tags:manage — a real claim replacing is_super_admin() on tags_write /
+--      aliases_write. NO data migration: has_claim() short-circuits on
+--      is_super_admin (0001), so every existing super admin keeps working with
+--      zero rows in user_claims. That property is why claims can be added at
+--      all.
+--
+--   4. A verb/column lockdown, applying 0007's pattern to the newly-widened
+--      principal set.
+--
+--   5. merge_tech_tag() — atomic, locked, and explicit about every row it
+--      moves. The cascade is never asked to do the repointing.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+
+-- ── 1. The alias-key rule, once ────────────────────────────────────────────
+--
+-- IMMUTABLE because a CHECK constraint requires it, and because it genuinely
+-- is: lower() and regexp_replace() are both immutable, and Postgres builds
+-- regex ranges by code point, so `[a-z]` is U+0061..U+007A regardless of the
+-- database collation.
+--
+-- Verbatim the expression 0003 already used to derive every seeded self-alias.
+-- Do NOT "improve" it to [[:alnum:]] — that is locale-dependent and would start
+-- admitting accented characters, silently changing what resolves to what.
+create or replace function tech_tag_alias_key(name text)
+returns text language sql immutable strict parallel safe
+set search_path = public, extensions, pg_temp as $$
+  select regexp_replace(lower(name), '[^a-z0-9]', '', 'g');
+$$;
+
+comment on function tech_tag_alias_key(text) is
+  'PRD §7 alias normalisation: lower(name) with non-alphanumerics stripped. '
+  'THE definition. src/lib/pipeline/finalize-project.ts:aliasKey is a copy kept '
+  'for the batched lookup; the CHECK on tech_tag_aliases is what stops the two '
+  'from diverging silently.';
+
+-- A non-normalised alias is not an error today — it is simply a row that can
+-- never match, because resolveTags looks up by the normalised key. It fails as
+-- ABSENCE, which is invisible: the symptom is a duplicate tag appearing in the
+-- review queue weeks later. This makes it fail as an error instead.
+--
+-- NOT VALID deliberately: existing rows are not scanned, so this migration
+-- cannot fail on a pre-0011 hand-written alias. Every INSERT and UPDATE from
+-- here on IS checked, which is the part that matters. To finish the job:
+--
+--   select alias, tech_tag_id from tech_tag_aliases
+--    where alias <> tech_tag_alias_key(alias);
+--   alter table tech_tag_aliases validate constraint tech_tag_aliases_normalized;
+alter table public.tech_tag_aliases
+  drop constraint if exists tech_tag_aliases_normalized;
+
+alter table public.tech_tag_aliases
+  add constraint tech_tag_aliases_normalized
+  check (alias = tech_tag_alias_key(alias)) not valid;
+
+
+-- ── 2. Self-alias, maintained by the database ──────────────────────────────
+--
+-- resolveTags creates a tag and its alias in TWO non-atomic PostgREST calls.
+-- If the second fails, the tag exists with no alias and is permanently
+-- unresolvable — so the next finalize that sees the same spelling creates
+-- ANOTHER duplicate. A tag inserted through PostgREST by a tags:manage holder
+-- has the same problem from birth.
+--
+-- ON CONFLICT DO NOTHING, never DO UPDATE: a self-alias must never steal a key
+-- that already resolves to a different tag. That overwrite is precisely the bug
+-- that orphans tags (see the matching fix in finalize-project.ts).
+--
+-- SECURITY DEFINER for the same reason grant_default_claims (0001) is: an
+-- after-insert trigger writing to a second RLS-protected table must not fail
+-- because the inserting principal's claims differ between the two.
+create or replace function tech_tags_sync_self_alias() returns trigger
+language plpgsql security definer
+set search_path = public, extensions, pg_temp as $$
+declare k text;
+begin
+  k := tech_tag_alias_key(new.canonical_name);
+  -- A symbol-only name ('++') keys to the empty string and would collide with
+  -- every other symbol-only name. Skipped rather than rejected: raising here
+  -- would throw inside finalize, whose catch forces status='ready' and
+  -- discards the whole summary for that project (§15.9). A bad tag name must
+  -- not cost a summary.
+  if k = '' then return null; end if;
+
+  insert into tech_tag_aliases (alias, tech_tag_id) values (k, new.id)
+  on conflict (alias) do nothing;
+
+  return null;
+end;
+$$;
+
+drop trigger if exists tech_tags_self_alias on public.tech_tags;
+create trigger tech_tags_self_alias
+  after insert or update of canonical_name on public.tech_tags
+  for each row execute function tech_tags_sync_self_alias();
+
+
+-- ── 3. tags:manage replaces is_super_admin ─────────────────────────────────
+--
+-- Curating the taxonomy is ongoing work that grows with every finalize.
+-- Gating it on is_super_admin meant the only way to delegate it was to hand
+-- over user management, the audit log, and permanent bypass of every claim
+-- check. This makes it a claim like any other.
+--
+-- DROP + CREATE rather than ALTER POLICY, to keep the full predicate visible in
+-- one place the way 0002 writes them. Safe: policies are permissive, so a table
+-- with none is default-DENY — the intermediate state fails closed, and
+-- `db push` runs the migration in a transaction regardless.
+--
+-- The (select ...) wrapping is 0002's InitPlan hoist, correct to apply here
+-- because neither predicate references a column of the row being written
+-- (unlike claims_insert/claims_delete, which must NOT be hoisted).
+--
+-- user_claims.claim is free text with no FK or enum, so granting 'tags:manage'
+-- needs no schema change. claims_insert's per-row guard ("you may only grant
+-- what you hold") means a super admin mints the first one.
+drop policy if exists tags_write on public.tech_tags;
+create policy tags_write on public.tech_tags for all to authenticated
+using ((select has_claim((select auth.uid()), 'tags:manage')))
+with check ((select has_claim((select auth.uid()), 'tags:manage')));
+
+drop policy if exists aliases_write on public.tech_tag_aliases;
+create policy aliases_write on public.tech_tag_aliases for all to authenticated
+using ((select has_claim((select auth.uid()), 'tags:manage')))
+with check ((select has_claim((select auth.uid()), 'tags:manage')));
+
+
+-- ── 4. Lockdown, per 0007 ──────────────────────────────────────────────────
+--
+-- `for all` gave the holder every verb on tech_tags, which was defensible when
+-- the principal was the single most-trusted account. tags:manage is delegated,
+-- and the same PostgREST request that approves a tag can do two other things
+-- that fail silently:
+--
+--   PATCH ?id=eq.X {"canonical_name": "..."}
+--     Renames the tag out from under its alias. More importantly, this revoke
+--     is about the columns 0011 has not thought of yet — as in 0007, once
+--     table UPDATE is revoked, every column a LATER migration adds is
+--     un-writable through the API until someone deliberately grants it.
+--
+--   DELETE ?id=eq.X
+--     Cascades through project_tech_tags and strips the tag from every project
+--     that carried it, with no repointing and no record. That is exactly the
+--     outcome merge_tech_tag exists to prevent, reachable in one request.
+--     PRD §12 offers two actions, "approve, or merge into an existing tag" —
+--     neither is a raw delete.
+--
+-- Order matters: Postgres cannot subtract a column from a table-level grant
+-- (0007) — it emits a WARNING and changes nothing. Revoke the table privilege
+-- first, then re-grant the one permitted column.
+--
+-- merge_tech_tag is SECURITY DEFINER and runs as the owner, so it is unaffected
+-- by both revokes; the pipeline connects as service_role, also unaffected.
+revoke update, delete on public.tech_tags from authenticated, anon;
+grant update (is_approved) on public.tech_tags to authenticated;
+
+
+-- ── 5. merge_tech_tag ──────────────────────────────────────────────────────
+--
+-- SECURITY DEFINER for 0006's reason, not for convenience: the merge writes
+-- project_tech_tags, whose ptt_write policy demands 'projects:update'. A
+-- tags-only curator holds tags:manage and need not hold that. So the write
+-- escapes its own policy, and the function performs the claim check that
+-- replaces it. Authorization stays in SQL.
+--
+-- Returns the number of projects repointed.
+create or replace function merge_tech_tag(p_source uuid, p_target uuid)
+returns int language plpgsql security definer
+set search_path = public, extensions, pg_temp as $$
+declare
+  v_source_name text;
+  v_target_name text;
+  v_key         text;
+  v_key_owner   uuid;
+  v_aliases     int;
+  v_projects    int;
+  v_shared      int;
+begin
+  -- FIRST, before any lock is taken: an unprivileged caller must not be able to
+  -- block a legitimate merge, however briefly.
+  if not has_claim((select auth.uid()), 'tags:manage') then
+    raise exception 'Missing permission: tags:manage';
+  end if;
+
+  if p_source is null or p_target is null then
+    raise exception 'merge_tech_tag: source and target are both required';
+  end if;
+
+  if p_source = p_target then
+    raise exception 'Cannot merge a tech tag into itself';
+  end if;
+
+  -- ── THE LOCK, and the mode is load-bearing ───────────────────────────────
+  -- Inserting into project_tech_tags runs an RI check that takes FOR KEY SHARE
+  -- on the referenced tech_tags row, and FOR KEY SHARE conflicts with exactly
+  -- one mode: FOR UPDATE. Holding it means no concurrent finalize can commit a
+  -- project_tech_tags or tech_tag_aliases row pointing at EITHER tag while this
+  -- merge runs.
+  --
+  -- Without it: a finalize inserts (P, source) after the repoint below and
+  -- before the delete at the end, the cascade eats that row, and project P is
+  -- left carrying NEITHER tag. Silent, and unattributable afterwards.
+  --
+  -- FOR NO KEY UPDATE reads as sufficient and is NOT — it does not conflict
+  -- with FOR KEY SHARE, and the race above would stay wide open.
+  --
+  -- ORDER BY id gives a deterministic acquisition order, so merge(A,B) racing
+  -- merge(B,A) serialises instead of deadlocking.
+  perform 1 from tech_tags where id in (p_source, p_target) order by id for update;
+
+  -- Read AFTER the lock, so these cannot be stale. canonical_name is NOT NULL,
+  -- so `not found` is the only way these come back empty.
+  select canonical_name into v_source_name from tech_tags where id = p_source;
+  if not found then
+    raise exception 'merge_tech_tag: source tech tag does not exist';
+  end if;
+
+  select canonical_name into v_target_name from tech_tags where id = p_target;
+  if not found then
+    raise exception 'merge_tech_tag: target tech tag does not exist';
+  end if;
+
+  -- ── Aliases ──────────────────────────────────────────────────────────────
+  -- No conflict guard, and none is possible: tech_tag_aliases' PRIMARY KEY is
+  -- `alias` ALONE (0001), so one alias cannot belong to two tags, and this
+  -- statement changes only the non-key column. A `not exists` guard here would
+  -- be dead code.
+  update tech_tag_aliases set tech_tag_id = p_target where tech_tag_id = p_source;
+  get diagnostics v_aliases = row_count;
+
+  -- The source's own spelling must survive its tag, or the next finalize that
+  -- meets that variant re-creates it as a fresh unapproved duplicate — which is
+  -- the whole point of the feature (PRD §14 T8: "creates an alias so the same
+  -- variant normalizes automatically next time").
+  --
+  -- Normalised HERE, in SQL, not passed in by the caller. An alias key is an
+  -- unvalidatable string — any [a-z0-9]* value is syntactically legal — so a
+  -- caller-supplied key that is subtly wrong produces a merge that reports
+  -- success and silently normalises nothing.
+  --
+  -- Runs AFTER the repoint above, so if the source owned this key it is already
+  -- on the target and the conflict is a no-op.
+  --
+  -- DO NOTHING, not DO UPDATE: if the key is held by a THIRD tag, that tag is
+  -- already the destination for this spelling, and overwriting would strip its
+  -- alias and could orphan it — the same failure this feature exists to clean
+  -- up. v_key_owner records where the spelling actually landed.
+  v_key := tech_tag_alias_key(v_source_name);
+  if v_key <> '' then
+    insert into tech_tag_aliases (alias, tech_tag_id) values (v_key, p_target)
+    on conflict (alias) do nothing;
+    select tech_tag_id into v_key_owner from tech_tag_aliases where alias = v_key;
+  end if;
+
+  -- ── Projects ─────────────────────────────────────────────────────────────
+  -- Here the PK collision IS real: (project_id, tech_tag_id), and a project can
+  -- legitimately carry both tags — commonly, because the duplicate spelling was
+  -- emitted alongside the canonical one by the same extraction run. Repoint
+  -- only where the target is absent.
+  --
+  -- The NOT EXISTS cannot race: no concurrent transaction can have committed a
+  -- (project, target) row, because the FOR UPDATE above blocks its RI check.
+  -- The UPDATE cannot self-collide either: every candidate row has
+  -- tech_tag_id = p_source, so their project_ids are distinct by the PK.
+  with moved as (
+    update project_tech_tags ptt
+       set tech_tag_id = p_target
+     where ptt.tech_tag_id = p_source
+       and not exists (select 1 from project_tech_tags dup
+                        where dup.project_id = ptt.project_id
+                          and dup.tech_tag_id = p_target)
+    returning 1
+  )
+  select count(*) into v_projects from moved;
+
+  -- The residue: projects that already carried both. Deleted EXPLICITLY rather
+  -- than left to the cascade. Not a style preference — it means the DELETE
+  -- below has nothing left to cascade to, so this function's correctness never
+  -- depends on ON DELETE CASCADE doing something it was not asked to do, and a
+  -- future change to that FK clause cannot silently alter what a merge does.
+  delete from project_tech_tags where tech_tag_id = p_source;
+  get diagnostics v_shared = row_count;
+
+  -- LAST. Every referencing row has already been moved or removed by name.
+  delete from tech_tags where id = p_source;
+
+  -- T8's audit write. RLS on audit_log has a SELECT policy only; this lands
+  -- because a definer function runs as the table owner. Atomic with the merge,
+  -- which the TypeScript audit path cannot be.
+  insert into audit_log (actor_id, action, entity_type, entity_id, meta)
+  values ((select auth.uid()), 'tech_tag.merge', 'tech_tag', p_target,
+          jsonb_build_object(
+            'source_id',               p_source,
+            'source_canonical_name',   v_source_name,
+            'target_canonical_name',   v_target_name,
+            'alias_key',               v_key,
+            -- <> p_target means the source's spelling was already claimed by a
+            -- third tag and was left alone. The merge is still correct; that
+            -- spelling just does not route here yet.
+            'alias_key_resolves_to',   v_key_owner,
+            'aliases_repointed',       v_aliases,
+            'projects_repointed',      v_projects,
+            'projects_already_tagged', v_shared));
+
+  return v_projects;
+end;
+$$;
+
+
+-- ── Review queue, with usage counts ────────────────────────────────────────
+--
+-- A definer RPC rather than a PostgREST join, for two reasons. The count reads
+-- project_tech_tags, whose ptt_select policy requires 'projects:view' — and a
+-- tags-only curator need not hold it, so a plain join would return zeros rather
+-- than an error. And it collapses what would otherwise be one count query per
+-- tag.
+--
+-- Counts DISTINCT projects excluding soft-deleted ones: a queue that says
+-- "4 projects" when three of them are deleted is worse than no number.
+create or replace function unapproved_tag_usage()
+returns table (
+  id uuid,
+  canonical_name text,
+  created_at timestamptz,
+  project_count bigint
+)
+language plpgsql stable security definer
+set search_path = public, extensions, pg_temp as $$
+begin
+  if not has_claim((select auth.uid()), 'tags:manage') then
+    raise exception 'Missing permission: tags:manage';
+  end if;
+
+  return query
+  select t.id, t.canonical_name, t.created_at,
+         count(distinct p.id) as project_count
+  from tech_tags t
+  left join project_tech_tags ptt on ptt.tech_tag_id = t.id
+  left join projects p on p.id = ptt.project_id and p.deleted_at is null
+  where not t.is_approved
+  group by t.id, t.canonical_name, t.created_at
+  order by count(distinct p.id) desc, t.created_at asc;
+end;
+$$;
+
+
+-- ── Execute grants ─────────────────────────────────────────────────────────
+--
+-- Revoking from public does not break the CHECK constraint or the trigger, for
+-- 0001's reason: stored expressions are evaluated by the executor, not as
+-- user-initiated function calls, so no EXECUTE check runs.
+--
+-- service_role is granted merge_tech_tag for symmetry with soft_delete_project,
+-- with the same caveat: auth.uid() is null under service_role, so has_claim()
+-- returns false and the guard rejects it. Reachable only from a session that
+-- has set a JWT.
+revoke execute on function tech_tag_alias_key(text), merge_tech_tag(uuid, uuid),
+  unapproved_tag_usage(), tech_tags_sync_self_alias() from public;
+grant execute on function tech_tag_alias_key(text), merge_tech_tag(uuid, uuid),
+  unapproved_tag_usage() to authenticated, service_role;
 
 
 -- ═════════════════════════════════════════════════════════════════════════

@@ -8,7 +8,12 @@ import { Chip } from "@/components/ui/chip";
 import { formatBytes, MAX_FILES_PER_PROJECT } from "@/lib/uploads/mime";
 import { useNewProjectFiles, type QueuedFile } from "./files-context";
 
-const ACCEPT = ".txt,.md,.pdf,.docx,.pptx";
+/**
+ * Mirrors EXTENSION_MIMES in @/lib/uploads/mime. Without the media entries the
+ * OS file picker filters them out and drag-and-drop is the only way to add a
+ * recording — the file is accepted, but the button appears not to work.
+ */
+const ACCEPT = ".txt,.md,.pdf,.docx,.pptx,.mp3,.wav,.m4a,.mp4,.mov";
 
 /**
  * The file queue. Files are NOT uploaded here — they are uploaded by whoever
@@ -70,8 +75,17 @@ export function FileDropzone({ disabled }: { disabled?: boolean }) {
           </button>
           .
         </p>
+        {/* Two lines because the two caps are genuinely different and one
+            sentence cannot carry both without implying the smaller applies to
+            everything. */}
         <p className="mb-0 text-label uppercase tracking-label text-n500">
-          PDF · DOCX · PPTX · TXT · MD — up to 50 MB each,{" "}
+          PDF · DOCX · PPTX · TXT · MD — up to 50 MB each
+        </p>
+        <p className="mb-0 text-label uppercase tracking-label text-n500">
+          MP3 · WAV · M4A · MP4 · MOV — up to 200 MB each, transcribed
+          automatically
+        </p>
+        <p className="mb-0 text-label uppercase tracking-label text-n500">
           {MAX_FILES_PER_PROJECT} per project
         </p>
 

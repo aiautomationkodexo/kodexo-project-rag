@@ -138,7 +138,7 @@ export async function getProject(id: string) {
     await Promise.all([
       supabase
         .from("documents")
-        .select("id, filename, doc_role, status, error, is_synthetic")
+        .select("id, filename, mime, doc_role, status, error, is_synthetic")
         .eq("project_id", id)
         .eq("is_active", true)
         .order("created_at", { ascending: true }),

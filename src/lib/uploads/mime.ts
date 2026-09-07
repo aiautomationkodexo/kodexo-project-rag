@@ -6,8 +6,27 @@
  * affordance, never a boundary.
  */
 
-/** Mirrors both the bucket's file_size_limit and documents.size_bytes CHECK. */
+/**
+ * Documents only. Every one of these formats is DOWNLOADED into the function
+ * and parsed in memory, which is what bounds it.
+ */
 export const MAX_FILE_BYTES = 52_428_800; // 50 MB
+
+/**
+ * Audio and video only (T7). A 10-minute 1080p MP4 is routinely 80-150 MB and
+ * there is no user-facing way to shrink one, so 50 MB would have made T7's own
+ * acceptance criterion unreachable. Raising it is safe precisely because this
+ * path never buffers: Deepgram is handed a signed URL and fetches the bytes
+ * itself, so the 50 MB memory argument does not apply.
+ *
+ * THIS FILE IS THE ONLY PLACE THE PER-TYPE RULE EXISTS. The bucket's
+ * file_size_limit is a single scalar and cannot express it, and the
+ * documents.size_bytes CHECK is a flat 200 MB bound (migration 0010) — both of
+ * those fire only AFTER the bytes have moved. classifyFile runs first, on both
+ * sides of the upload, so the distinction has to live here.
+ */
+export const MAX_MEDIA_BYTES = 209_715_200; // 200 MB
+
 export const MAX_FILES_PER_PROJECT = 20;
 
 /**
@@ -29,8 +48,7 @@ export const EXTENSION_MIMES: Record<string, readonly string[]> = {
   ".pptx": [
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ],
-  // T7 (Deepgram). Present so the bucket allowlist and this table stay in sync,
-  // but gated by T7_EXTENSIONS below until transcription ships.
+  // Transcribed via Deepgram (T7) — see src/lib/ai/deepgram.ts.
   ".mp3": ["audio/mpeg"],
   ".wav": ["audio/wav"],
   ".m4a": ["audio/x-m4a", "audio/mp4"],
@@ -38,8 +56,12 @@ export const EXTENSION_MIMES: Record<string, readonly string[]> = {
   ".mov": ["video/quicktime"],
 };
 
-/** Accepted by the bucket, not yet extractable. Rejected with a clear reason. */
-export const T7_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".mp4", ".mov"]);
+/** Transcribed rather than parsed, and carrying the larger size cap (T7). */
+export const MEDIA_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".mp4", ".mov"]);
+
+export function maxBytesFor(extension: string): number {
+  return MEDIA_EXTENSIONS.has(extension) ? MAX_MEDIA_BYTES : MAX_FILE_BYTES;
+}
 
 /** Explicitly refused, with a message that says what to do instead. */
 export const REJECTED_EXTENSIONS: Record<string, string> = {
@@ -84,17 +106,18 @@ export function classifyFile(input: {
     return { ok: false, reason: `${ext} files are not supported.` };
   }
 
-  if (T7_EXTENSIONS.has(ext)) {
+  if (input.size <= 0) return { ok: false, reason: "The file is empty." };
+
+  const limit = maxBytesFor(ext);
+  if (input.size > limit) {
+    const mb = (input.size / 1_048_576).toFixed(1);
+    // Names the applicable limit, not a constant: told "exceeds the 50 MB
+    // limit" for a 120 MB video, a user has no way to learn that video is
+    // allowed 200 MB and that their file is the wrong KIND of too big.
     return {
       ok: false,
-      reason: "Audio and video transcription is not available yet.",
+      reason: `${mb} MB exceeds the ${Math.round(limit / 1_048_576)} MB limit for ${ext} files.`,
     };
-  }
-
-  if (input.size <= 0) return { ok: false, reason: "The file is empty." };
-  if (input.size > MAX_FILE_BYTES) {
-    const mb = (input.size / 1_048_576).toFixed(1);
-    return { ok: false, reason: `${mb} MB exceeds the 50 MB limit.` };
   }
 
   /*

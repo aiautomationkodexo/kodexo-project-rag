@@ -8,6 +8,8 @@
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint .",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --conditions=react-server --import ./tests/setup.mts --test tests/*.test.mts",
+    "test:llm": "RUN_LLM_TESTS=1 node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --conditions=react-server --import ./tests/setup.mts --env-file-if-exists=.env.local --test tests/llm/*.test.mts",
     "seed:admin": "node --env-file-if-exists=.env.local scripts/seed-admin.mts",
     "verify:cloud": "node --env-file-if-exists=.env.local scripts/verify-deployment.mts",
     "build:sql": "node scripts/build-setup-sql.mts",

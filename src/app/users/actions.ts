@@ -12,6 +12,7 @@ import {
   validateUserInput,
   type UserFieldErrors,
 } from "@/lib/users/validate";
+import { writeAudit } from "@/lib/audit/write";
 
 export type UserActionState = {
   error?: string;
@@ -110,6 +111,14 @@ export async function createUser(
     }
   }
 
+  await writeAudit({
+    actorId: actor.id,
+    action: "user.create",
+    entityType: "profile",
+    entityId: userId,
+    meta: { email, claims: extra.length },
+  });
+
   revalidatePath("/users");
   redirect(`/users/${userId}`);
 }
@@ -137,6 +146,24 @@ export async function updateUserClaims(
 
   const userId = String(formData.get("userId") ?? "");
   if (!userId) return { error: "Missing user id." };
+
+  /*
+   * No editing your own permissions — the same separation setUserActive and
+   * softDeleteUser already enforce.
+   *
+   * This is NOT an escalation guard; RLS already is one. claims_insert's
+   * per-row `has_claim(auth.uid(), claim)` arm means you can only ever grant a
+   * claim you already hold, so self-editing cannot raise your ceiling.
+   *
+   * What it prevents is self-DEMOTION: revoking your own 'users:update' is
+   * permitted by that same policy (you hold the claim, so you may delete the
+   * row) and it locks you out of the only screen that could undo it — recovery
+   * then needs another holder, or the seed script. And a permission system in
+   * which the subject is also the approver is wrong regardless.
+   */
+  if (userId === actor.id) {
+    return { error: "You cannot change your own permissions." };
+  }
 
   const selected = parseClaims(formData.getAll("claims").map(String));
 
@@ -181,6 +208,18 @@ export async function updateUserClaims(
     if (error) return { error: error.message };
   }
 
+  // The privilege-change record. Written even for a no-op submit would be
+  // noise, so it is gated on something having actually changed.
+  if (toAdd.length > 0 || toRemove.length > 0) {
+    await writeAudit({
+      actorId: actor.id,
+      action: "user.claims_update",
+      entityType: "profile",
+      entityId: userId,
+      meta: { granted: toAdd, revoked: toRemove },
+    });
+  }
+
   revalidatePath(`/users/${userId}`);
   revalidatePath("/users");
 
@@ -218,6 +257,14 @@ export async function updateUserProfile(
     .update({ name: name || null })
     .eq("id", userId);
   if (error) return { error: error.message };
+
+  await writeAudit({
+    actorId: actor.id,
+    action: "user.profile_update",
+    entityType: "profile",
+    entityId: userId,
+    meta: { name: name || null },
+  });
 
   revalidatePath(`/users/${userId}`);
   return { ok: "Saved." };
@@ -259,6 +306,14 @@ export async function setUserActive(
     .eq("id", userId);
   if (error) return { error: error.message };
 
+  await writeAudit({
+    actorId: actor.id,
+    action: "user.set_active",
+    entityType: "profile",
+    entityId: userId,
+    meta: { is_active: active },
+  });
+
   revalidatePath(`/users/${userId}`);
   revalidatePath("/users");
   return { ok: active ? "Account reactivated." : "Account deactivated." };
@@ -295,6 +350,13 @@ export async function softDeleteUser(formData: FormData): Promise<void> {
     .update({ deleted_at: new Date().toISOString(), is_active: false })
     .eq("id", userId);
   if (error) throw new Error(error.message);
+
+  await writeAudit({
+    actorId: actor.id,
+    action: "user.delete",
+    entityType: "profile",
+    entityId: userId,
+  });
 
   revalidatePath("/users");
   redirect("/users");

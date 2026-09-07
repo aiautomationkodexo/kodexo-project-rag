@@ -118,6 +118,69 @@ for (const fn of ["claim_finalize", "claim_document", "soft_delete_project"]) {
   }
 }
 
+// ── 2b. RPCs from 0009 / 0011 ──────────────────────────────────────────────
+console.log("\nSweep + tag admin (0009, 0011)");
+
+// Read-only and safe to call for real: each returns rows rather than mutating.
+// Calling them proves the migration landed AND that the function actually runs,
+// which a catalog lookup does not.
+const readOnlyRpcs: [string, Record<string, unknown>][] = [
+  ["stranded_projects", { older_than_minutes: 15 }],
+  ["purgeable_projects", { older_than_days: 30, match_limit: 1 }],
+  ["recently_active_projects", { within_hours: 24, match_limit: 1 }],
+];
+
+for (const [fn, args] of readOnlyRpcs) {
+  const { error } = await admin.rpc(fn, args);
+  if (error && /Could not find the function|does not exist/i.test(error.message)) {
+    fail(`${fn}()`, "not found — migration 0009 missing");
+  } else if (error) {
+    fail(`${fn}()`, error.message);
+  } else {
+    pass(`${fn}() runs`);
+  }
+}
+
+// The claim-guarded pair. Under the service role auth.uid() is null, so
+// has_claim() is false and both raise before touching a row — which makes this
+// a SAFE existence probe for a function that would otherwise mutate.
+for (const [fn, args] of [
+  ["unapproved_tag_usage", {}],
+  ["merge_tech_tag", {
+    p_source: "00000000-0000-0000-0000-000000000000",
+    p_target: "00000000-0000-0000-0000-000000000001",
+  }],
+] as [string, Record<string, unknown>][]) {
+  const { error } = await admin.rpc(fn, args);
+  if (error && /Could not find the function|does not exist/i.test(error.message)) {
+    fail(`${fn}()`, "not found — migration 0011 missing");
+  } else if (error && /Missing permission: tags:manage/.test(error.message)) {
+    pass(`${fn}() resolves`, "claim guard fired as designed");
+  } else if (error) {
+    fail(`${fn}()`, error.message);
+  } else {
+    // merge_tech_tag reaching here would mean the guard did NOT fire.
+    warn(`${fn}()`, "returned without the expected tags:manage guard");
+  }
+}
+
+// A real functional check, not an existence probe: this is THE definition of
+// the alias rule, and src/lib/tags/alias-key.ts is a copy of it. If these ever
+// disagree, finalize writes aliases that can never resolve and duplicate tags
+// start accumulating with nothing raised anywhere.
+const { data: aliasKey, error: aliasErr } = await admin.rpc("tech_tag_alias_key", {
+  name: "Next.js",
+});
+if (aliasErr && /Could not find the function|does not exist/i.test(aliasErr.message)) {
+  fail("tech_tag_alias_key()", "not found — migration 0011 missing");
+} else if (aliasErr) {
+  fail("tech_tag_alias_key()", aliasErr.message);
+} else if (aliasKey !== "nextjs") {
+  fail("tech_tag_alias_key('Next.js')", `returned ${JSON.stringify(aliasKey)}, expected "nextjs" — SQL has drifted from src/lib/tags/alias-key.ts`);
+} else {
+  pass("tech_tag_alias_key() matches the TS copy", "'Next.js' → 'nextjs'");
+}
+
 // ── 3. Storage bucket (0004a) ──────────────────────────────────────────────
 console.log("\nStorage (0004)");
 const { data: buckets, error: bucketErr } = await admin.storage.listBuckets();
@@ -132,8 +195,8 @@ if (bucketErr) {
     if (b.public) fail("bucket visibility", "PUBLIC — must be private");
     else pass("bucket is private");
     const limit = (b as { file_size_limit?: number | null }).file_size_limit;
-    if (limit === 52428800) pass("file_size_limit", "50 MB");
-    else warn("file_size_limit", `${limit ?? "unset"} — expected 52428800; check Storage → Settings for the GLOBAL cap too`);
+    if (limit === 209715200) pass("file_size_limit", "200 MB");
+    else warn("file_size_limit", `${limit ?? "unset"} — expected 209715200; check Storage → Settings for the GLOBAL cap too (it defaults below 200 MB and silently clamps the bucket)`);
   }
 }
 

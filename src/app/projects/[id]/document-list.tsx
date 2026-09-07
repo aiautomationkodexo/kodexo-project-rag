@@ -1,6 +1,10 @@
 import { StatusChip } from "@/components/ui/status-chip";
 import type { DocumentRow } from "@/lib/types";
 
+function isMedia(mime: string): boolean {
+  return mime.startsWith("audio/") || mime.startsWith("video/");
+}
+
 /**
  * DESIGN.md §5.9 PhaseBlock, adapted. Its `first` prop gave the recommended
  * starting phase a heavier 1.5px n800 border; here that treatment marks the
@@ -38,6 +42,16 @@ export function DocumentList({ documents }: { documents: DocumentRow[] }) {
 
           {doc.status === "failed" && doc.error ? (
             <p className="mt-[6px] mb-0 text-small text-err-ink">{doc.error}</p>
+          ) : null}
+
+          {/* A recording sits in 'processing' for minutes rather than the
+              seconds a PDF takes, with no progress signal of any kind — the
+              work is happening at Deepgram. Saying so is the difference
+              between "still going" and "stuck". */}
+          {doc.status === "processing" && isMedia(doc.mime) ? (
+            <p className="mt-[6px] mb-0 text-small text-n500">
+              Transcribing — a long recording can take several minutes.
+            </p>
           ) : null}
         </li>
       ))}

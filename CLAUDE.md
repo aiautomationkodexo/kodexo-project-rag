@@ -10,7 +10,7 @@ An internal portfolio knowledge base: projects are described or documented, the 
 - **[DESIGN.md](DESIGN.md)** — Kodexo Labs design system. Print-first (A4, `pt`); §9 is the web translation.
 - **[SETUP.md](SETUP.md)** — everything the code cannot do for itself (Supabase dashboard, Vercel, local stack).
 
-Built through PRD §14 **T1–T6**, plus a security migration (`0007`) and the §10 completion email. Not yet built: **T7** (Deepgram audio/video) and **T8** (tag approve/merge, audit-log writes, orphaned-storage cleanup in the cron sweep).
+Built through PRD §14 **T1–T8**, plus a security migration (`0007`), the §10 completion email, and the §14 additive-summary regression test. Migrations `0009`–`0011` complete T7/T8: sweep recovery + storage lifecycle, the 200 MB media cap, and tag approve/merge.
 
 ## Read the shipped Next docs, not your training data
 
@@ -34,7 +34,16 @@ npm run types:db     # regenerate src/lib/supabase/database.types.ts (--linked)
 npm run build:sql    # regenerate supabase/setup.sql from migrations/ + seed/
 npm run verify:cloud # post-push smoke test (add -- --send-mail to send one)
 npm run seed:admin -- <project-ref>   # idempotent; asserts has_claim(...) === true
+
+npm test            # fast suite: pure logic, no network, no database
+npm run test:llm    # PRD §14 additive-summary regression — CALLS THE LIVE OpenAI API
 ```
+
+`npm test` runs `node --test` with two flags that are both load-bearing:
+`--conditions=react-server` resolves `server-only` to its own no-op (otherwise
+every pipeline/ai import throws), and `--import ./tests/setup.mts` installs a
+resolver hook for `@/*` aliases and extensionless relative imports, neither of
+which Node does natively. Without them a test can only reach leaf modules.
 
 **Cloud-only. There is no local Supabase stack** — `db:start`/`db:stop`/`db:reset`
 were removed deliberately: `supabase db reset` against a linked project wipes the
@@ -99,7 +108,7 @@ Added: `zod`, `server-only` (enforces §15.7 at build time), `supabase` CLI, ESL
 
 ## Uploads and extraction (T6)
 
-Files go **straight to Storage** from the browser via a signed URL, keeping 50 MB payloads away from Vercel's 4.5 MB body limit. `/api/upload-url` mints both the document id and (on create) the project id, so the storage key and the row agree with no second round trip and no staging bucket.
+Files go **straight to Storage** from the browser via a signed URL, keeping payloads (50 MB documents, 200 MB media) away from Vercel's 4.5 MB body limit. `/api/upload-url` mints both the document id and (on create) the project id, so the storage key and the row agree with no second round trip and no staging bucket.
 
 - **`/api/upload-url` is the only cookie-authenticated route under `/api`.** It authenticates itself with `getCurrentUser()`. Do not add `/api` back to the proxy matcher to "fix" it — that 307s the machine routes.
 - **Upload progress needs `XMLHttpRequest`.** `uploadToSignedUrl` builds a FormData and PUTs it with `fetch`, which reports no progress; `src/lib/uploads/upload.ts` sends the byte-identical request over XHR.
@@ -108,6 +117,72 @@ Files go **straight to Storage** from the browser via a signed URL, keeping 50 M
 - **Permanent vs transient failures.** `PermanentExtractionError` (no text layer, not a real pptx, unsupported type) marks a document `failed` immediately. Retrying a malformed file three times can never succeed and holds the whole project in `processing` for ~15 minutes.
 - **Duplicate extracted text** hits `documents_project_hash_idx` (23505). Handled as a *semantic* outcome — chunks deleted, document `failed` with a naming message, `attempts` maxed. Letting it reach the generic retry path stranded the project permanently with no visible error.
 - **`addFilesToProject` sets `projects.status = 'processing'` BEFORE dispatching.** `claim_finalize` only fires on `processing`; adding files to a `ready` project without the reset means it returns false forever and no re-summary happens.
+
+## Transcription, tags, and the sweep (T7 / T8)
+
+**Three numbers must move together, or documents get processed twice.**
+`TRANSCRIBE_TIMEOUT_MS (600s) < maxDuration (800s) < claim_document reclaim (900s)`.
+The middle inequality is the only thing preventing a second worker from
+starting on a document the first is still transcribing; the two would then race
+`delete chunks` against their own inserts and leave a duplicated chunk set that
+is invisible except as double-weighted retrieval. `chunks_document_ordinal_idx`
+(`0009`) turns that into a loud 23505, but it is a backstop, not a licence.
+The first inequality exists because Vercel's kill at `maxDuration` is
+*uncatchable* — no catch runs, so a hung call leaves no status, no error and no
+attempt bookkeeping.
+
+**Deepgram failures classify on "is the file the problem", not "could this ever
+succeed".** A permanent verdict is terminal and writes a message onto the
+user's document. So a wrong `DEEPGRAM_API_KEY` is **transient** — matching the
+*missing*-key path, which is transient because `required()` throws a plain
+Error — and only an undecodable-media 400, a 413, or a successful decode with
+no speech are permanent. The one 400 that is transient is Deepgram failing to
+*fetch* our signed URL; classifying it permanent fails a good recording forever.
+
+**`SIGNED_URL_TTL_SECONDS` is derived from `TRANSCRIBE_TIMEOUT_MS`, not typed.**
+If the URL expires mid-transcription Deepgram reports a 400, which is one
+string match from being read as corrupt media.
+
+**The per-type size rule lives only in `src/lib/uploads/mime.ts`.** The bucket's
+`file_size_limit` is a single scalar and cannot express it, and the
+`documents.size_bytes` CHECK is a flat 200 MB *bound* on a client-reported
+number. `classifyFile` is the only gate that runs before the bytes move.
+`supabase/config.toml` must stay in step or `npm run buckets:push` writes 50 MiB
+back over migration `0010`.
+
+**`merge_tech_tag` takes `FOR UPDATE`, and the mode is the point.** Inserting
+into `project_tech_tags` runs an FK check that takes `FOR KEY SHARE`, and
+`FOR UPDATE` is the only mode that conflicts with it. `FOR NO KEY UPDATE` reads
+as sufficient and leaves the race open: a concurrent finalize inserts
+`(P, source)` after the repoint and before the delete, the cascade eats it, and
+project P ends up carrying **neither** tag. The merge also moves every
+referencing row *by name* before deleting the tag — its correctness never
+depends on `ON DELETE CASCADE`.
+
+**Tag writes go through the USER's client.** `tags_write` is the authorization
+check, and `0011`'s `grant update (is_approved)` is what stops the approve call
+from also rewriting `canonical_name`. `DELETE` on `tech_tags` is revoked from
+`authenticated` outright — a raw delete cascades the tag off every project with
+no repointing, which is exactly what merge exists to prevent.
+
+**Alias upserts must pass `ignoreDuplicates: true`.** PostgREST's default
+`onConflict` is `DO UPDATE`, which *steals* the alias from whatever tag owns it
+— the mechanism that manufactures orphaned duplicate tags, and the one thing
+that can silently undo a committed merge.
+
+**PRD §13 step 3 does not do what the PRD says.** "Objects with no `documents`
+row" never matches a deleted project, because `soft_delete_project` only sets
+`deleted_at` and nothing hard-deletes a project. The sweep therefore has two
+storage rules: purge by `projects.deleted_at` past 30 days (the actual leak),
+and remove abandoned uploads. The latter **needs the 30-minute age guard** —
+`/api/upload-url` mints the key before the `documents` row exists, so every
+in-flight upload is by definition an object with no row.
+
+**`writeAudit` never throws.** Every call site runs after its mutation has
+committed, so throwing would report failure for work that succeeded — and in
+`deleteProject`/`softDeleteUser` would show an error for a row that is already
+gone. `merge_tech_tag` writes its own audit row in SQL instead, which is atomic
+with the merge; that is only possible because the work is already in an RPC.
 
 ## Constraints that bite silently
 

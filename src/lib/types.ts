@@ -94,6 +94,8 @@ export type ProjectSearchResult = ProjectListItem & {
 export type DocumentRow = {
   id: string;
   filename: string;
+  /** Needed to tell a transcription in progress from a parse (T7). */
+  mime: string;
   doc_role: string | null;
   status: DocumentStatus;
   error: string | null;

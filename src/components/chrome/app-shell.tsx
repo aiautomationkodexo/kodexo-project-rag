@@ -28,6 +28,9 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
             {can(user, "users:view") ? (
               <NavLink href="/users">Users</NavLink>
             ) : null}
+            {can(user, "tags:manage") ? (
+              <NavLink href="/admin/tags">Tags</NavLink>
+            ) : null}
             {user ? (
               <form action="/auth/signout" method="get">
                 <Button variant="ghost" size="sm" type="submit">

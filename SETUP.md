@@ -129,7 +129,7 @@ Run these in the dashboard SQL editor. Do **not** infer success from the exit co
 `0004` is designed to succeed with work skipped.
 
 ```sql
--- all seven recorded
+-- all ELEVEN recorded: 0001..0011
 select version from supabase_migrations.schema_migrations order by version;
 
 -- vector must be in `extensions`, not `public`
@@ -145,7 +145,7 @@ where n.nspname = 'public' and p.proname = 'search_projects';
 select relname, relrowsecurity from pg_class
 where relnamespace = 'public'::regnamespace and relkind = 'r' order by 1;
 
--- 0004a: bucket. Expect: false | 52428800 | 11
+-- 0004a + 0010: bucket. Expect: false | 209715200 | 11
 select public, file_size_limit, array_length(allowed_mime_types, 1)
 from storage.buckets where id = 'project-files';
 
@@ -161,6 +161,41 @@ where pubname = 'supabase_realtime' order by 1;
 select column_name from information_schema.column_privileges
 where table_schema='public' and table_name='profiles'
   and grantee='authenticated' and privilege_type='UPDATE' order by 1;
+
+-- 0009: the sweep RPCs + the chunk uniqueness backstop
+select proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname='public'
+  and proname in ('stranded_projects','purgeable_projects','recently_active_projects')
+order by 1;
+select indexname from pg_indexes
+where tablename='chunks' and indexname='chunks_document_ordinal_idx';
+
+-- 0010: expect 209715200 (a 50 MB value means the migration did not land)
+select pg_get_constraintdef(oid) from pg_constraint
+where conrelid='public.documents'::regclass and conname='documents_size_bytes_check';
+
+-- 0011: the alias rule must agree with src/lib/tags/alias-key.ts.
+-- Expect: nextjs | c | net
+select tech_tag_alias_key('Next.js'), tech_tag_alias_key('C#'), tech_tag_alias_key('.NET');
+
+-- 0011: tags_write must now be claim-based, NOT is_super_admin
+select policyname, qual from pg_policies
+where schemaname='public' and tablename='tech_tags' and policyname='tags_write';
+
+-- 0011: expect EXACTLY is_approved (a row for canonical_name means the
+-- lockdown did not apply and a curator can rename tags out from under aliases)
+select column_name from information_schema.column_privileges
+where table_schema='public' and table_name='tech_tags'
+  and grantee='authenticated' and privilege_type='UPDATE' order by 1;
+```
+
+**Aliases that predate `0011`.** Its CHECK is added `NOT VALID`, so existing rows are
+not scanned and the push cannot fail on one. Audit and finish the job separately:
+
+```sql
+select alias, tech_tag_id from tech_tag_aliases
+ where alias <> tech_tag_alias_key(alias);          -- expect zero rows
+alter table tech_tag_aliases validate constraint tech_tag_aliases_normalized;
 ```
 
 **Why the storage policies are tolerable and Realtime is not.** Every Storage call in
@@ -246,9 +281,17 @@ replayable in a way a dashboard click never was.
 What genuinely remains manual:
 
 - **Create the project**, pick a region, confirm Postgres 17 and asymmetric JWT keys (§1.1).
-- **Storage → Settings**: confirm the *global* file size limit is ≥ 50 MB. The bucket
-  row from `0004` sets a per-bucket limit, but the platform limit caps it — get this
-  wrong and 50 MB uploads fail while the bucket looks perfectly correct.
+- **Storage → Settings**: confirm the *global* file size limit is **≥ 200 MB**. The
+  bucket row from `0004`/`0010` sets a per-bucket limit, but the platform limit caps it —
+  get this wrong and large uploads fail while the bucket looks perfectly correct, and
+  `verify:cloud` passes because it reads the bucket row, not the effective limit.
+  200 MB is what T7 needs: audio and video are capped there (documents stay at 50 MB)
+  because a 10-minute MP4 routinely exceeds 100 MB. The default global limit is lower
+  and may be a plan-tier question.
+- **`DEEPGRAM_API_KEY`** in the environment, if audio or video will be uploaded. Every
+  other format ignores it; when it is missing, media documents retry and then fail with
+  a message that blames the transcription service, and the real cause is only in the
+  logs (`[deepgram] 401 …`).
 - **Anything §2's verification shows as skipped**, which for `0004` means running the
   affected block from the SQL editor.
 

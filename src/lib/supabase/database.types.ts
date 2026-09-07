@@ -452,6 +452,24 @@ export type Database = {
       has_claim: { Args: { c: string; uid: string }; Returns: boolean }
       is_active_user: { Args: { uid: string }; Returns: boolean }
       is_super_admin: { Args: { uid: string }; Returns: boolean }
+      merge_tech_tag: {
+        Args: { p_source: string; p_target: string }
+        Returns: number
+      }
+      purgeable_projects: {
+        Args: { match_limit?: number; older_than_days?: number }
+        Returns: {
+          document_id: string
+          project_id: string
+          storage_key: string
+        }[]
+      }
+      recently_active_projects: {
+        Args: { match_limit?: number; within_hours?: number }
+        Returns: {
+          id: string
+        }[]
+      }
       search_projects: {
         Args: {
           filter_industry?: string
@@ -469,11 +487,27 @@ export type Database = {
         }[]
       }
       soft_delete_project: { Args: { p_project: string }; Returns: boolean }
+      stranded_projects: {
+        Args: { older_than_minutes?: number }
+        Returns: {
+          id: string
+        }[]
+      }
       stuck_documents: {
         Args: { older_than_minutes?: number }
         Returns: {
           id: string
           project_id: string
+        }[]
+      }
+      tech_tag_alias_key: { Args: { name: string }; Returns: string }
+      unapproved_tag_usage: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          canonical_name: string
+          created_at: string
+          id: string
+          project_count: number
         }[]
       }
     }

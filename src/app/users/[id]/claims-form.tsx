@@ -13,12 +13,14 @@ export function ClaimsForm({
   initial,
   isSuperAdmin,
   canEdit,
+  isSelf,
 }: {
   userId: string;
   actor: { isSuperAdmin: boolean; claims: Claim[] };
   initial: Claim[];
   isSuperAdmin: boolean;
   canEdit: boolean;
+  isSelf: boolean;
 }) {
   const [state, formAction] = useActionState<UserActionState, FormData>(
     updateUserClaims,
@@ -34,6 +36,28 @@ export function ClaimsForm({
           through the app — it is granted only by the seed script.
         </p>
       </Callout>
+    );
+  }
+
+  /*
+   * Checked AFTER isSuperAdmin: a super admin holds no claim rows, so that
+   * callout is both true and more informative. In practice this branch only
+   * renders for a non-super-admin viewing their own page.
+   *
+   * Read-only rather than hidden — you should still be able to SEE what you
+   * hold, just not change it.
+   */
+  if (isSelf) {
+    return (
+      <>
+        <Callout variant="info" label="This is you" className="mb-panel-y">
+          <p className="mb-0">
+            You cannot change your own permissions. Someone else with permission
+            to manage users has to do it.
+          </p>
+        </Callout>
+        <ClaimsGrid actor={actor} initial={initial} disabled />
+      </>
     );
   }
 

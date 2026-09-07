@@ -9,6 +9,7 @@ import { dispatch } from "@/lib/pipeline/dispatch";
 import { contentHash } from "@/lib/pipeline/process-document";
 import { MIN_CHUNK } from "@/lib/pipeline/chunk";
 import { validateProjectInput, type FieldErrors } from "@/lib/projects/validate";
+import { writeAudit } from "@/lib/audit/write";
 import { MAX_FILES_PER_PROJECT } from "@/lib/uploads/mime";
 
 export type ActionState = {
@@ -182,6 +183,17 @@ export async function createProject(
     };
   }
 
+  // Before the after()/revalidate/redirect chain, which is ordered and must
+  // stay contiguous — redirect() throws NEXT_REDIRECT, so anything after it is
+  // unreachable.
+  await writeAudit({
+    actorId: user.id,
+    action: "project.create",
+    entityType: "project",
+    entityId: projectId,
+    meta: { title, documents: documentIds.length },
+  });
+
   after(() => dispatch(documentIds, projectId)); // 1. register BEFORE redirect
   revalidatePath("/projects"); // 2.
   redirect(`/projects/${projectId}`); // 3. LAST, outside try/catch
@@ -252,6 +264,14 @@ export async function updateProject(
 
   if (updateError) return { error: updateError.message };
 
+  await writeAudit({
+    actorId: user.id,
+    action: "project.update",
+    entityType: "project",
+    entityId: projectId,
+    meta: { title, description_changed: descriptionChanged },
+  });
+
   // Unchanged text means nothing to re-embed and nothing to re-summarise.
   if (!descriptionChanged || !synthetic) {
     revalidatePath(`/projects/${projectId}`);
@@ -304,6 +324,16 @@ export async function deleteProject(formData: FormData): Promise<void> {
     p_project: projectId,
   });
   if (error) throw new Error(error.message);
+
+  // Soft delete, so the row survives — but the files do not: the sweep purges
+  // them once deleted_at passes the retention window (0009). This row is the
+  // only record of who started that clock.
+  await writeAudit({
+    actorId: user.id,
+    action: "project.delete",
+    entityType: "project",
+    entityId: projectId,
+  });
 
   revalidatePath("/projects");
   redirect("/projects");
@@ -390,6 +420,14 @@ export async function addFilesToProject(
     .update({ status: "processing", last_updated_by: user.id })
     .eq("id", projectId);
   if (statusError) return { error: statusError.message };
+
+  await writeAudit({
+    actorId: user.id,
+    action: "project.add_files",
+    entityType: "project",
+    entityId: projectId,
+    meta: { documents: documentIds.length },
+  });
 
   // 3. Only now dispatch.
   after(() => dispatch(documentIds, projectId));

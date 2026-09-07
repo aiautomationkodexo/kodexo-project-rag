@@ -171,6 +171,19 @@ $$;
 -- processing a document that a slow-but-alive invocation still holds.
 --
 -- Returns true only if THIS caller won the right to process the document.
+--
+-- TIMING INVARIANT — the 15 minutes below is the third term in:
+--
+--   TRANSCRIBE_TIMEOUT_MS (600s)  <  maxDuration (800s)  <  reclaim (900s)
+--
+-- The reclaim window MUST stay above the route's maxDuration, or a still-living
+-- invocation's document becomes claimable and a second worker starts on it.
+-- Two workers then race `delete chunks where document_id` against their own
+-- inserts, which leaves a permanently duplicated chunk set — invisible except
+-- as duplicate search snippets and double-weighted retrieval.
+-- (0009's chunks_document_ordinal_idx makes that overlap fail loudly instead,
+-- but it is a backstop, not a licence to shorten this interval.)
+-- See src/app/api/process/[documentId]/route.ts and src/lib/ai/deepgram.ts.
 create or replace function claim_document(p_document uuid)
 returns boolean language plpgsql security definer
 set search_path = public, extensions, pg_temp as $$

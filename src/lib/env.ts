@@ -69,6 +69,22 @@ export const serverEnv = {
     return process.env.OPENAI_CHAT_MODEL;
   },
   /**
+   * REQUIRED, like openaiApiKey — deliberately not soft-optional.
+   *
+   * It is only ever read on the audio/video extraction path, so a deployment
+   * that never uploads media never touches it. When it IS missing, throwing a
+   * plain Error is the correct outcome: that is the pipeline's TRANSIENT class,
+   * so the document retries and the operator gets three cron cycles of grace to
+   * set the variable, instead of a permanently failed document blaming a
+   * recording that was fine.
+   *
+   * See the 401 argument in ai/deepgram.ts — a WRONG key is classified the same
+   * way for the same reason, so the two operator mistakes behave identically.
+   */
+  get deepgramApiKey() {
+    return required("DEEPGRAM_API_KEY", process.env.DEEPGRAM_API_KEY);
+  },
+  /**
    * SMTP transport for the completion email. SOFT-OPTIONAL on purpose: returns
    * undefined rather than throwing when unset.
    *

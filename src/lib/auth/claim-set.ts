@@ -19,6 +19,7 @@ export const CLAIMS = [
   "users:create",
   "users:update",
   "users:delete",
+  "tags:manage",
 ] as const;
 
 export type Claim = (typeof CLAIMS)[number];
@@ -35,6 +36,7 @@ export const PRESETS = {
     "users:view",
     "users:create",
     "users:update",
+    "tags:manage",
   ],
 } as const satisfies Record<string, readonly Claim[]>;
 
@@ -50,6 +52,7 @@ export const CLAIM_LABELS: Record<Claim, string> = {
   "users:create": "Create users",
   "users:update": "Edit users and their permissions",
   "users:delete": "Deactivate and delete users",
+  "tags:manage": "Approve and merge technology tags",
 };
 
 /** Narrows an arbitrary string from FormData to a Claim. */
