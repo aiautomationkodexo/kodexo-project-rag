@@ -5,9 +5,13 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Chip } from "@/components/ui/chip";
 import { StatusChip } from "@/components/ui/status-chip";
 import { can, requireClaim } from "@/lib/auth/claims";
+import { disclosure } from "@/lib/projects/disclosure";
+import { ENGAGEMENT_LABELS, isEngagementType } from "@/lib/projects/validate";
+import { linkLabel } from "@/lib/projects/links";
+import { NdaForm } from "./nda-form";
 import { getProject } from "@/lib/projects/queries";
 import { asSummary } from "@/lib/types";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatDateRange } from "@/lib/format";
 import { SummarySections } from "./summary-sections";
 import { DocumentList } from "./document-list";
 import { AddFiles } from "./add-files";
@@ -36,9 +40,16 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
   const data = await getProject(id);
   if (!data) notFound();
 
-  const { project, documents, tags, createdBy, updatedBy } = data;
+  const { project, documents, tags, createdBy, updatedBy, links, client } =
+    data;
   const summary = asSummary(project.summary);
   const canUpdate = can(user, "projects:update");
+  const canSetNda = can(user, "projects:set-nda");
+  const d = disclosure(project.nda_status);
+  const engagement =
+    project.engagement_type && isEngagementType(project.engagement_type)
+      ? ENGAGEMENT_LABELS[project.engagement_type]
+      : null;
 
   return (
     <>
@@ -97,6 +108,15 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
               projectId={project.id}
               title={project.title}
               description={project.description ?? ""}
+              engagementType={project.engagement_type}
+              startDate={project.start_date}
+              endDate={project.end_date}
+              teamSize={project.team_size}
+              // Rendered back in the paste format so an edit round-trips.
+              // Title-first matches the parser's `Title — URL` form.
+              links={links
+                .map((l) => (l.title ? `${l.title} — ${l.url}` : l.url))
+                .join("\n")}
             />
           ) : null}
 
@@ -113,6 +133,26 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
                 <StatusChip kind="project" status={project.status} />
               </Meta>
               <Meta label="Industry">{project.industry ?? "—"}</Meta>
+              <Meta label="Engagement">{engagement ?? "—"}</Meta>
+              <Meta label="Dates">
+                {formatDateRange(project.start_date, project.end_date)}
+              </Meta>
+              <Meta label="Team size">{project.team_size ?? "—"}</Meta>
+              <Meta label="Disclosure">
+                {/* "Not reviewed", not "—": absence has teeth on this field.
+                    An em dash reads as "nobody bothered" when it actually
+                    means "treat as excluded". */}
+                {project.nda_status ?? "Not reviewed"}
+                <span className="block text-caption text-n500">
+                  {d.mayUseBrand
+                    ? d.mayUseClientName
+                      ? "Brand and client name may be used"
+                      : "Brand may be used; client must not be named"
+                    : d.mayUseClientName
+                      ? "Client may be named; brand use not permitted"
+                      : "Not for external use"}
+                </span>
+              </Meta>
               <Meta label="Technologies">
                 {tags.length === 0 ? (
                   <span className="text-n400">None yet</span>
@@ -153,10 +193,78 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
               description={`${documents.length} ${documents.length === 1 ? "document" : "documents"}`}
             />
             <CardContent>
-              <DocumentList documents={documents} />
+              <DocumentList
+                documents={documents}
+                projectId={project.id}
+                canUpdate={canUpdate}
+              />
               {canUpdate ? <AddFiles projectId={project.id} /> : null}
             </CardContent>
           </Card>
+
+          {links.length > 0 ? (
+            <Card>
+              <CardHeader title="Links" />
+              <CardContent className="py-[4px]">
+                <ul className="m-0 list-none p-0">
+                  {links.map((link) => (
+                    <li
+                      key={link.id}
+                      className="border-b border-n200 py-cell-y last:border-b-0"
+                    >
+                      {/* rel="noopener noreferrer" is mandatory alongside
+                          target="_blank": without noopener the opened page
+                          gets a window.opener handle back to ours. */}
+                      <a
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-body text-list text-ink underline underline-offset-2 hover:text-red"
+                      >
+                        {linkLabel(link)}
+                      </a>
+                      {link.description ? (
+                        <span className="block text-caption text-n500">
+                          {link.description}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {/*
+            Client information. `client` is null both when nobody set one AND
+            when the viewer lacks projects:view-client-info — the RLS policy on
+            project_client returns zero rows rather than erroring, so there is
+            no second copy of the authorization rule here to drift out of step
+            with the database.
+          */}
+          {client?.client_name ? (
+            <Card>
+              <CardHeader
+                title="Client"
+                description="Restricted. Uploaded documents may still name the client in search results."
+              />
+              <CardContent className="py-[4px]">
+                <Meta label="Client name">{client.client_name}</Meta>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {canSetNda ? (
+            <Card>
+              <CardHeader
+                title="Disclosure"
+                description="Governs whether this project may be named externally."
+              />
+              <CardContent>
+                <NdaForm projectId={project.id} ndaStatus={project.nda_status} />
+              </CardContent>
+            </Card>
+          ) : null}
         </aside>
       </div>
     </>

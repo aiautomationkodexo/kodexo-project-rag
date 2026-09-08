@@ -1,5 +1,7 @@
 import { StatusChip } from "@/components/ui/status-chip";
+import { Chip } from "@/components/ui/chip";
 import type { DocumentRow } from "@/lib/types";
+import { VisibilityToggle } from "./visibility-toggle";
 
 function isMedia(mime: string): boolean {
   return mime.startsWith("audio/") || mime.startsWith("video/");
@@ -37,7 +39,15 @@ function describe(doc: DocumentRow): { label: string; role: string | null } {
  * document currently PROCESSING — a faithful reuse of "the one that matters
  * right now".
  */
-export function DocumentList({ documents }: { documents: DocumentRow[] }) {
+export function DocumentList({
+  documents,
+  projectId,
+  canUpdate = false,
+}: {
+  documents: DocumentRow[];
+  projectId?: string;
+  canUpdate?: boolean;
+}) {
   if (documents.length === 0) return null;
 
   return (
@@ -66,7 +76,15 @@ export function DocumentList({ documents }: { documents: DocumentRow[] }) {
                   </span>
                 ) : null}
               </div>
-              <StatusChip kind="document" status={doc.status} />
+              <span className="flex flex-wrap items-center gap-[4px]">
+                {/* tone="neutral", NOT warn: warn is deliberately unallocated
+                    so "documents failed" keeps its meaning, and an
+                    unindexed document is a chosen state, not a problem. */}
+                {doc.visibility === "no_index" ? (
+                  <Chip title="Stored, but not searchable">Not indexed</Chip>
+                ) : null}
+                <StatusChip kind="document" status={doc.status} />
+              </span>
             </div>
 
             {doc.status === "failed" && doc.error ? (
@@ -81,6 +99,17 @@ export function DocumentList({ documents }: { documents: DocumentRow[] }) {
               <p className="mt-[6px] mb-0 text-small text-n500">
                 Transcribing — a long recording can take several minutes.
               </p>
+            ) : null}
+
+            {/* The synthetic description document is excluded: it IS the
+                project description, so removing it from the index while the
+                description still renders on the page would be incoherent. */}
+            {canUpdate && projectId && !doc.is_synthetic ? (
+              <VisibilityToggle
+                projectId={projectId}
+                documentId={doc.id}
+                visibility={doc.visibility}
+              />
             ) : null}
           </li>
         );

@@ -8,6 +8,8 @@ import { Field } from "@/components/ui/field";
 import { Input, Textarea } from "@/components/ui/input";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { createProject, type ActionState } from "../actions";
+import { MetaFields } from "../meta-fields";
+import { LinksField } from "../links-field";
 import { requestUploadUrl, uploadToSignedUrl } from "@/lib/uploads/upload";
 import { descriptionMinFor, TITLE_MIN } from "@/lib/projects/validate";
 import {
@@ -167,6 +169,10 @@ function Inner({ dropzone }: { dropzone?: React.ReactNode }) {
           placeholder="What was the problem, what was built, what changed as a result? The more specific, the better the search results."
         />
       </Field>
+
+      <MetaFields idPrefix="new" errors={state.fieldErrors} />
+
+      <LinksField idPrefix="new" />
 
       <section className="mb-panel-y">
         {dropzone ?? <FileDropzone disabled={uploading} />}

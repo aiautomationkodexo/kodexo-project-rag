@@ -8,6 +8,36 @@ export function formatDate(iso: string): string {
   });
 }
 
+/** A `date` column: "2025-03-04". No time, so no timezone. */
+function formatDay(iso: string): string {
+  // Parsed as UTC by spec for a bare YYYY-MM-DD, then formatted in UTC, so a
+  // date never shifts by a day for readers west of the meridian. Constructing
+  // `new Date("2025-03-04")` and formatting it LOCALLY is the classic
+  // off-by-one here.
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
+ * An engagement's span. One string, not two fields: "Mar 2024 — ongoing" is a
+ * single fact to a reader, and the details rail is 320px wide.
+ */
+export function formatDateRange(
+  start: string | null,
+  end: string | null,
+): string {
+  if (!start && !end) return "—";
+  if (start && !end) return `${formatDay(start)} — ongoing`;
+  // An end with no start is legal (0012's CHECK permits it): we may know when
+  // something shipped and not when it began.
+  if (!start && end) return `until ${formatDay(end)}`;
+  return `${formatDay(start!)} — ${formatDay(end!)}`;
+}
+
 /**
  * Fallback when the model omits a section label: `client_feedback` →
  * `Client feedback`. §15.12 still applies — this derives a heading from
