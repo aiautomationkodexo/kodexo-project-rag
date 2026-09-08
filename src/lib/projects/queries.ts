@@ -3,6 +3,7 @@ import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import { embedQuery } from "@/lib/ai/openai";
 import { toVector } from "@/lib/supabase/vector";
+import type { Paged } from "@/lib/pagination";
 import {
   asDocumentStatus,
   asProjectStatus,
@@ -52,23 +53,146 @@ export async function listIndustries(): Promise<string[]> {
   return (data ?? []).map((r) => r.name);
 }
 
+/**
+ * Builds a Paged<T> from a PostgREST `count` and the caller's window.
+ *
+ * `count` is `number | null` — null when the request did not ask for one, and
+ * treating that as 0 would silently render "0 results" over a full table. The
+ * fallback is the row count actually returned, which is never wrong by more
+ * than the last page.
+ */
+function toPaged<T>(
+  items: T[],
+  count: number | null,
+  page: number,
+  perPage: number,
+): Paged<T> {
+  const total = count ?? items.length;
+  return {
+    items,
+    total,
+    page,
+    pageCount: Math.max(1, Math.ceil(total / perPage)),
+  };
+}
+
+/**
+ * A page of projects.
+ *
+ * Uses `.range()` + `{ count: "exact" }` — the previous `.limit()` returned a
+ * window with no total, so "Page 1 of N" was unrepresentable and the UI could
+ * only offer "show 5/10/25". `exact` (rather than `planned`/`estimated`) runs a
+ * real COUNT: this table is a few thousand rows of internal portfolio at most,
+ * and an estimate that disagrees with the visible rows is worse than the
+ * milliseconds it saves.
+ *
+ * OVER-RANGE IS HANDLED HERE, NOT BY THE CALLER. A page cannot clamp `?page=`
+ * before querying because the total is not known until the query returns.
+ * PostgREST answers an out-of-range window with zero rows AND the true count,
+ * so when the requested page overshoots we re-query the last real page. That
+ * costs a second round trip only on a URL nobody navigates to by hand, and it
+ * is what stops `?page=9999` rendering an empty table with both arrows dead.
+ */
 export async function listProjects(options: {
   industry?: string | null;
-  limit: number;
+  page: number;
+  perPage: number;
   sort: "recent" | "oldest";
-}): Promise<ProjectListItem[]> {
+}): Promise<Paged<ProjectListItem>> {
   const supabase = await createClient();
 
-  let query = supabase
+  const run = async (page: number) => {
+    const from = (page - 1) * options.perPage;
+    let query = supabase
+      .from("projects")
+      .select(LIST_COLUMNS, { count: "exact" })
+      .is("deleted_at", null)
+      .order("created_at", { ascending: options.sort === "oldest" })
+      .range(from, from + options.perPage - 1);
+
+    if (options.industry) query = query.eq("industry", options.industry);
+
+    const { data, count } = await query;
+    return {
+      items: ((data ?? []) as unknown as RawListRow[]).map(toListItem),
+      count,
+    };
+  };
+
+  const first = await run(options.page);
+  const pageCount = Math.max(
+    1,
+    Math.ceil((first.count ?? first.items.length) / options.perPage),
+  );
+
+  if (options.page > pageCount) {
+    const last = await run(pageCount);
+    return toPaged(last.items, last.count, pageCount, options.perPage);
+  }
+
+  return toPaged(first.items, first.count, options.page, options.perPage);
+}
+
+/**
+ * The dashboard tiles.
+ *
+ * One round trip per counter, all `head: true` — no rows cross the wire, only
+ * the Content-Range header. Running them in parallel keeps the dashboard at
+ * the cost of its slowest count rather than their sum.
+ *
+ * `failedDocuments` counts DOCUMENTS, not projects, and only active ones: a
+ * superseded upload that failed before being replaced is not a live problem
+ * and must not keep the tile red forever.
+ */
+export async function getPortfolioStats(): Promise<{
+  total: number;
+  processing: number;
+  ready: number;
+  failedDocuments: number;
+}> {
+  const supabase = await createClient();
+
+  const projectCount = (status?: "processing" | "finalizing" | "ready") => {
+    let q = supabase
+      .from("projects")
+      .select("id", { count: "exact", head: true })
+      .is("deleted_at", null);
+    if (status) q = q.eq("status", status);
+    return q;
+  };
+
+  const [total, processing, finalizing, ready, failed] = await Promise.all([
+    projectCount(),
+    projectCount("processing"),
+    projectCount("finalizing"),
+    projectCount("ready"),
+    supabase
+      .from("documents")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "failed")
+      .eq("is_active", true),
+  ]);
+
+  return {
+    total: total.count ?? 0,
+    // `processing` and `finalizing` are one idea to a reader — both mean "the
+    // pipeline still owes you a summary". Splitting them across two tiles
+    // would surface an implementation detail as a metric.
+    processing: (processing.count ?? 0) + (finalizing.count ?? 0),
+    ready: ready.count ?? 0,
+    failedDocuments: failed.count ?? 0,
+  };
+}
+
+/** The N most recent projects, for the dashboard's activity table. */
+export async function listRecentProjects(limit: number): Promise<ProjectListItem[]> {
+  const supabase = await createClient();
+  const { data } = await supabase
     .from("projects")
     .select(LIST_COLUMNS)
     .is("deleted_at", null)
-    .order("created_at", { ascending: options.sort === "oldest" })
-    .limit(options.limit);
-
-  if (options.industry) query = query.eq("industry", options.industry);
-
-  const { data } = await query;
+    .order("created_at", { ascending: false })
+    .limit(limit);
   return ((data ?? []) as unknown as RawListRow[]).map(toListItem);
 }
 

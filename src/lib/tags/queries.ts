@@ -61,3 +61,27 @@ export async function listMergeTargets(): Promise<MergeTarget[]> {
 
   return data ?? [];
 }
+
+/**
+ * How many tags await review — the dashboard tile.
+ *
+ * Counts `tech_tags` directly rather than reusing `unapproved_tag_usage`,
+ * which aggregates project counts per tag and would pull the whole queue over
+ * the wire to measure its length. `head: true` sends no rows at all.
+ *
+ * Unlike `listUnapprovedTags`, this SWALLOWS its error and returns 0. The
+ * distinction is deliberate: there, an empty queue is a claim about the
+ * curator's workload and being wrong misleads them. Here the number sits on a
+ * dashboard beside four others, and throwing would take down the whole page
+ * over one tile. A viewer without 'tags:manage' never sees it.
+ */
+export async function countUnapprovedTags(): Promise<number> {
+  const supabase = await createClient();
+  const { count, error } = await supabase
+    .from("tech_tags")
+    .select("id", { count: "exact", head: true })
+    .eq("is_approved", false);
+
+  if (error) return 0;
+  return count ?? 0;
+}

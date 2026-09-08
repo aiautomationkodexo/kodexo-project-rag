@@ -2,9 +2,24 @@
 
 /* ══════════════════════════════════════════════════════════════════════════
    Kodexo Labs design system — app translation.
-   Source: DESIGN.md (print-first, A4, authored in pt). §9 is the web
-   conversion at 1pt = 1.3333px. Colour values are locked upstream: do not
-   invent shades, do not hand-pick greys.
+
+   SOURCE OF TRUTH: Kodexo Labs Visual Identity v1.0 (`tokens.css`, generated
+   from sot/visual-identity.tokens.json). That file is marked "DO NOT modify
+   locally" — every colour, radius, spacing step, shadow and family below is
+   copied from it verbatim. Do not invent shades and do not hand-pick greys.
+
+   DESIGN.md is the older, print-first derivation (A4, authored in pt) and is
+   SUPERSEDED wherever the two disagree. The disagreements, all resolved in the
+   SOT's favour, are recorded at each site below:
+     · radius   — DESIGN.md said a flat 2px; the SOT ships a 6→20px scale.
+     · shadows  — DESIGN.md principle 6 banned them; the SOT defines three.
+     · type     — H1 is Unbounded (statement), H2–H4 Bernabeu→Outfit.
+     · semantic — each pair gains a BORDER alongside bg + text.
+
+   Still in force, because the SOT does not contradict them: red is rationed to
+   one run per view, all chrome comes from the neutral ramp, semantic colours
+   are used as locked sets, and the app is light-only (the SOT's dark block is
+   deliberately not emitted — see the BASE layer).
    ══════════════════════════════════════════════════════════════════════════ */
 
 @theme {
@@ -17,7 +32,7 @@
 
   /* ── TIER 1 · BRAND ───────────────────────────────────────────────────
      Rationed. In-app that means ONE red run per view (the single primary
-     action), plus chrome (wordmark middot, active nav item). Nothing else. */
+     action), plus chrome (the logo mark, active nav item). Nothing else. */
   --color-red: #f54545; /* primary action, active state */
   --color-red-deep: #b22424; /* prose links only */
   --color-red-tint: #ffe1e1; /* ::selection */
@@ -36,16 +51,25 @@
   --color-n900: #18181b; /* dark band, table header */
   --color-n950: #09090b;
 
-  /* ── TIER 3 · SEMANTIC — LOCKED PAIRS ────────────────────────────────
-     Never mix a background from one pair with text from another. Use the
-     tone-* utilities below, which set both halves at once. */
+  /* ── TIER 3 · SEMANTIC — LOCKED SETS ─────────────────────────────────
+     The SOT ships each semantic colour as a TRIPLE (bg / border / text), not
+     the pair DESIGN.md described. The border is what lets a semantic surface
+     sit on a tinted ground and still read as a distinct object — with only two
+     values, a warn callout on --bg-alt has no edge at all.
+
+     Never mix a value from one set with a value from another. The tone-*
+     utilities below set all three at once, which makes that impossible. */
   --color-ok-bg: #dcfce7;
+  --color-ok-edge: #86efac;
   --color-ok-ink: #166534;
   --color-warn-bg: #fef3c7;
+  --color-warn-edge: #fcd34d;
   --color-warn-ink: #92400e;
   --color-err-bg: #fee2e2;
+  --color-err-edge: #fca5a5;
   --color-err-ink: #991b1b;
   --color-info-bg: #dbeafe;
+  --color-info-edge: #93c5fd;
   --color-info-ink: #1e40af;
 
   /* ── TIER 4 · ILLUSTRATION — one hue per document ─────────────────────── */
@@ -94,23 +118,82 @@
   --tracking-kicker: 0.24em;
   --tracking-title: -0.02em;
 
-  /* ── GEOMETRY — principle 5: near-zero radius, everywhere ─────────────── */
-  --radius-box: 2px;
+  /* ── GEOMETRY — SOT radius scale ──────────────────────────────────────
+     SUPERSEDES DESIGN.md principle 5 ("near-zero radius, 2px everywhere").
+     The SOT ships a real scale, which is also what makes the UI read as a
+     shadcn-family product rather than a print artefact.
 
-  /* ── RHYTHM (§9 conversions) ──────────────────────────────────────────── */
-  --spacing-para: 12px; /*  9pt */
-  --spacing-cell-y: 8px; /*  6pt */
-  --spacing-cell-x: 11px; /*  8pt */
-  --spacing-panel-y: 15px; /* 11pt */
-  --spacing-panel-x: 17px; /* 13pt */
-  --spacing-section: 35px; /* 26pt */
+     `--radius-box` is KEPT as an alias for `sm` so the ~90 existing
+     `rounded-box` usages move to the new geometry in one edit instead of
+     ninety. It is the default for every control and every card; reach past it
+     only for the cases named below.
+
+       sm  6px   controls, cards, chips, table frames  ← the default
+       md  10px  modals, popovers, large panels
+       lg  14px  hero / feature surfaces
+       xl  20px  rare, full-bleed marketing blocks
+       pill        pills and avatars ONLY */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+  --radius-box: var(--radius-sm);
+
+  /* ── ELEVATION — SOT shadows ──────────────────────────────────────────
+     SUPERSEDES DESIGN.md principle 6 ("no shadows, ever"), which existed
+     because the source medium was paper. These three are the ONLY legal
+     elevations; a hand-written `box-shadow` value is still a review failure,
+     because that is how a design system acquires nine slightly-different
+     drop effects. Applied through the shadow-* utilities below.
+
+     Used sparingly, per the brief: raised surfaces only (cards, popovers,
+     sticky chrome). A table row does not get one. */
+  --shadow-sm: 0 1px 2px rgba(9, 9, 11, 0.04);
+  --shadow-md: 0 4px 16px rgba(9, 9, 11, 0.06);
+  --shadow-lg: 0 24px 48px rgba(9, 9, 11, 0.1);
+
+  /* ── RHYTHM ───────────────────────────────────────────────────────────
+     The SOT's 4px scale replaces DESIGN.md's pt conversions, which produced
+     11px/15px/17px/35px steps that never aligned with each other. The named
+     roles are kept — call sites read `px-panel-x`, not `px-4` — but each now
+     resolves to a step on the 4px grid, so nested paddings finally stack. */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+
+  --spacing-para: 12px; /* was 12px — already on grid */
+  --spacing-cell-y: 8px; /* was  8px — already on grid */
+  --spacing-cell-x: 12px; /* was 11px */
+  --spacing-panel-y: 16px; /* was 15px */
+  --spacing-panel-x: 16px; /* was 17px — x and y now match, so a card's
+                              padding is square and nested boxes align */
+  --spacing-section: 32px; /* was 35px */
   --spacing-gutter: 24px;
   --spacing-shell: 32px;
 
   /* ── MEASURE ──────────────────────────────────────────────────────────── */
+  /* --container-doc is the A4 text block: the correct measure for READING
+     (a project summary, a login cover) and the wrong one for a data table.
+     --container-app is the dashboard shell's measure — wide enough for a
+     six-column table at comfortable density, capped so a 27" monitor does not
+     stretch rows into unreadable ribbons. Print rhythm is preserved inside it;
+     only the outer bound differs. */
   --container-doc: 880px;
+  --container-app: 1400px;
   --container-form: 560px;
   --container-prose: 68ch;
+
+  /* ── DASHBOARD SHELL ──────────────────────────────────────────────────── */
+  /* The sidebar replaces DESIGN.md §6's A4 running head. 240px holds the
+     longest nav label ("Tag review") plus a 16px icon and the 17px panel
+     gutter with room to spare, and matches the reference dashboards. */
+  --spacing-rail: 240px;
 }
 
 /* Font families must be `inline`: next/font injects its variables into a class
@@ -119,45 +202,101 @@
    var(--font-*-src) directly into the generated utility instead, so it resolves
    in the element's own cascade context. */
 @theme inline {
-  --font-display: var(--font-display-src), ui-sans-serif, system-ui, sans-serif;
+  /* SOT §Type. Four roles, not the two DESIGN.md described:
+
+       statement  Unbounded 900 — H1 only. The SOT's `--font-display-statement`
+                  and its `.statement-display` class. This is the face that
+                  makes a page look like Kodexo rather than like Tailwind.
+       heading    Bernabeu → Outfit — H2/H3/H4. Bernabeu is commercial and
+                  still absent; the SOT itself names Outfit as the fallback, so
+                  the substitute is now SPECIFIED rather than improvised
+                  (it was Archivo, which appears nowhere in the identity).
+       body       Manrope — unchanged.
+       hyper      Anton — cover titles only (/login).
+       mono       JetBrains Mono — code, plus the SOT's `.mono-kicker`.
+
+     `--font-display` is retained ONLY as a back-compat alias for the heading
+     face. Every call site now says `font-heading`; new code should too. */
+  --font-statement: var(--font-statement-src), var(--font-heading-src), sans-serif;
+  --font-heading: var(--font-heading-src), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-heading);
   --font-body: var(--font-body-src), ui-sans-serif, system-ui, sans-serif;
-  --font-hyper: var(--font-hyper-src), var(--font-display-src), sans-serif;
+  --font-hyper: var(--font-hyper-src), var(--font-statement-src), sans-serif;
   --font-mono: var(--font-mono-src), ui-monospace, SFMono-Regular, monospace;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   LOCKED-PAIR UTILITIES
-   Tier 3 says never mix a background from one pair with text from another.
-   These make that structurally impossible — one class sets both halves.
+   LOCKED-SET UTILITIES
+   A semantic colour is a triple (bg / border / text) and the three are never
+   mixed across sets. One class sets all three, which makes mixing impossible.
    Chips, callouts and banners use ONLY these.
+
+   `border-color` is set but `border-width` is NOT — the utility stays usable
+   on a borderless chip, and any element that wants the edge adds `border`
+   itself. That keeps one class correct for both roles.
    ══════════════════════════════════════════════════════════════════════════ */
 @utility tone-neutral {
   background-color: var(--color-n100);
+  border-color: var(--color-n200);
   color: var(--color-n700);
 }
 @utility tone-ok {
   background-color: var(--color-ok-bg);
+  border-color: var(--color-ok-edge);
   color: var(--color-ok-ink);
 }
 @utility tone-warn {
   background-color: var(--color-warn-bg);
+  border-color: var(--color-warn-edge);
   color: var(--color-warn-ink);
 }
 @utility tone-err {
   background-color: var(--color-err-bg);
+  border-color: var(--color-err-edge);
   color: var(--color-err-ink);
 }
 @utility tone-info {
   background-color: var(--color-info-bg);
+  border-color: var(--color-info-edge);
   color: var(--color-info-ink);
 }
 @utility tone-invert {
   background-color: var(--color-n900);
+  border-color: var(--color-n900);
   color: #fff;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   ELEVATION
+   The three SOT shadows, and nothing else. Named `elev-*` rather than
+   `shadow-*` on purpose: Tailwind's own `shadow-*` namespace is still absent
+   (the theme never defines `--shadow-*` in Tailwind's namespace), so a stray
+   `shadow-lg` in a diff remains a build-visible mistake instead of quietly
+   resolving to a stock value that is not ours.
+   ══════════════════════════════════════════════════════════════════════════ */
+@utility elev-sm {
+  box-shadow: var(--shadow-sm);
+}
+@utility elev-md {
+  box-shadow: var(--shadow-md);
+}
+@utility elev-lg {
+  box-shadow: var(--shadow-lg);
+}
+
+/* SOT `.mono-kicker` — the small uppercase category label above a page title.
+   Mono, not Manrope: it is the identity's one "engineered" typographic tell,
+   and it is what the reference dashboards' OVERVIEW / INVENTORY labels are. */
+@utility kicker {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-n500);
+}
+
 /* Border hierarchy carries structure — n200 hairline → n300 rule → n800
-   emphasis. Principle 6: never a shadow. */
+   emphasis. Principle 6: never an elevation effect. */
 @utility rule-heading {
   border-bottom: 1.5px solid var(--color-n300);
 }
@@ -169,10 +308,18 @@
    BASE
    ══════════════════════════════════════════════════════════════════════════ */
 @layer base {
-  /* Light only. DESIGN.md §9: the export defines no dark palette, and the
-     Tier 3 locked pairs have no dark half. Declaring the scheme stops the
-     browser auto-inverting native controls and scrollbars against a palette
-     that cannot support it. */
+  /* LIGHT ONLY — a deliberate scoping decision, not an oversight.
+
+     Visual Identity v1.0 DOES define a `[data-theme="dark"]` block, and this
+     app declines it for now. Emitting the variables without a control to flip
+     them would ship dead CSS; emitting them WITH `prefers-color-scheme` would
+     hand every user a theme nobody has reviewed against the semantic sets.
+     Turning it on later is: copy the SOT's dark block into a
+     `:root[data-theme="dark"]` rule, add the toggle, done — no call site
+     changes, because every colour below is already a token.
+
+     `color-scheme: light` stops the browser auto-inverting native controls
+     and scrollbars against a palette that has no dark half loaded. */
   :root {
     color-scheme: light;
   }
@@ -189,11 +336,25 @@
     background: #fff;
   }
 
-  h1,
+  /* SOT §Base type rules. H1 is the STATEMENT face (Unbounded 900, .02em,
+     lh 1.0); h2–h4 are the HEADING face (Bernabeu → Outfit, lh 1.2). The two
+     were one family before, which is why every heading looked the same
+     weight. */
+  h1 {
+    font-family: var(--font-statement);
+    font-weight: 900;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    color: var(--color-ink);
+    margin: 0;
+  }
+
   h2,
   h3,
   h4 {
-    font-family: var(--font-display);
+    font-family: var(--font-heading);
+    line-height: 1.2;
+    color: var(--color-ink);
     margin: 0;
   }
 
@@ -206,8 +367,16 @@
     color: var(--color-ink);
   }
 
-  /* Principle 6: NO SHADOWS. Tailwind's focus:ring-* compiles to box-shadow
-     and is therefore banned across this codebase. Focus is an outline. */
+  /* FOCUS IS AN OUTLINE, never a `ring`. Elevation is legal now (Identity
+     v1.0 ships three shadows, exposed as elev-*), but `focus:ring-*` still is
+     not: it compiles to a `box-shadow`, which would overwrite the `elev-*` of
+     any card a focused control sits inside — the focus indicator and the
+     surface would fight over one property.
+
+     NOTE the backticks above and elsewhere in this repo. Tailwind v4 extracts
+     class-name candidates from every scanned file INCLUDING its comments, so
+     naming either utility as a bare prose word emits that very utility into
+     the bundle — the thing this comment forbids. Always quote them. */
   :focus-visible {
     outline: 2px solid var(--color-n800);
     outline-offset: 1px;
@@ -231,7 +400,7 @@
   textarea,
   button {
     font-family: inherit;
-    border-radius: var(--radius-box);
+    border-radius: var(--radius-sm);
   }
   input,
   select,
@@ -244,5 +413,55 @@
     textarea {
       font-size: var(--text-body);
     }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BRAND MOTION (SOT §Brand motion)
+   Only `card-in` is used in-app: it staggers a row of cards on first paint,
+   which is what stops a dashboard's tile row appearing as one hard flash.
+   `mark-reveal` and `red-pulse` are cover/marketing devices and are not
+   emitted here — an animation nothing calls is dead CSS.
+
+   The stagger is nth-child based, so a caller marks the CONTAINER and the
+   children order themselves; nobody has to hand-index a delay.
+   ══════════════════════════════════════════════════════════════════════════ */
+@keyframes card-in {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@utility stagger-in {
+  & > * {
+    animation: card-in 400ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  & > *:nth-child(1) {
+    animation-delay: 0ms;
+  }
+  & > *:nth-child(2) {
+    animation-delay: 80ms;
+  }
+  & > *:nth-child(3) {
+    animation-delay: 160ms;
+  }
+  & > *:nth-child(4) {
+    animation-delay: 240ms;
+  }
+  & > *:nth-child(n + 5) {
+    animation-delay: 320ms;
+  }
+}
+
+/* SOT ships this guard with the keyframes; honouring it is not optional —
+   vestibular disorders are a real accessibility failure, not a preference. */
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in > * {
+    animation: none !important;
   }
 }

@@ -1,8 +1,8 @@
-import { Manrope, Anton, JetBrains_Mono, Archivo } from "next/font/google";
+import { Manrope, Anton, JetBrains_Mono, Outfit, Unbounded } from "next/font/google";
 
 /**
- * DESIGN.md §2.1 specifies four families. Three are on Google Fonts; the
- * display face is not.
+ * Visual Identity v1.0 §Type specifies five roles. Four are on Google Fonts;
+ * the heading face is commercial and is not.
  *
  * The CSS variables all end in `-src`. globals.css maps them into the Tailwind
  * `--font-*` namespace via `@theme inline` — without the suffix you'd get a
@@ -14,22 +14,45 @@ import { Manrope, Anton, JetBrains_Mono, Archivo } from "next/font/google";
  * must declare its weight.
  */
 
-// ── DISPLAY ────────────────────────────────────────────────────────────────
-// DESIGN.md specifies Bernabeu: commercial, six static OTFs, not in this repo.
-// Archivo is the stand-in — variable 100–900 with a real Black (non-negotiable,
-// since the role is 900 section headings and 700 subheads), and a tight
-// grotesque with closed apertures that reads "engineered" per design principle 5.
+// ── STATEMENT ──────────────────────────────────────────────────────────────
+// SOT `--font-display-statement`: Unbounded 900, H1 only.
+//
+// This is the identity's loudest typographic signal and the reason a Kodexo
+// page does not look like stock Tailwind. It is deliberately scoped to H1 —
+// Unbounded is a wide, high-personality display face and setting h2/h3 in it
+// would make every heading shout at the same volume, which is exactly the
+// flatness this redesign set out to fix.
+//
+// SOT names 'Parafina Black' as the first choice with Unbounded following;
+// Parafina is commercial and absent, and Unbounded is the shipped fallback in
+// the token file itself, so it is what we load.
+export const statement = Unbounded({
+  subsets: ["latin"],
+  variable: "--font-statement-src",
+  display: "swap",
+});
+
+// ── HEADING ────────────────────────────────────────────────────────────────
+// SOT `--font-heading`: 'Bernabeu', 'Outfit', system-ui.
+//
+// Bernabeu is commercial, ships as six static OTFs, and is not in this repo.
+// Outfit is the SOT's OWN named fallback — which is the important change from
+// the previous substitute (Archivo, which appears nowhere in the identity and
+// was chosen here by eye). The stand-in is now specified rather than improvised.
+//
+// Outfit is a geometric sans with a true 900, so the 900-section-heading /
+// 700-subhead relationship DESIGN.md relies on survives the substitution.
 //
 // TO SWAP IN THE REAL FONT: replace this one export. Nothing else changes.
 // next/font/local throws at build time on a missing file, so the swap seam has
 // to be a module boundary, not a path that resolves later.
 //
 //   import localFont from "next/font/local";
-//   export const display = localFont({
-//     variable: "--font-display-src",
+//   export const heading = localFont({
+//     variable: "--font-heading-src",
 //     display: "swap",
-//     // Keeps the substitute as the permanent degradation path.
-//     fallback: ["Archivo", "ui-sans-serif", "system-ui", "sans-serif"],
+//     // Keeps the SOT's named fallback as the permanent degradation path.
+//     fallback: ["Outfit", "ui-sans-serif", "system-ui", "sans-serif"],
 //     src: [
 //       { path: "./fonts/Bernabeu-Regular.otf",   weight: "400", style: "normal" },
 //       { path: "./fonts/Bernabeu-Medium.otf",    weight: "500", style: "normal" },
@@ -44,14 +67,14 @@ import { Manrope, Anton, JetBrains_Mono, Archivo } from "next/font/google";
 // fingerprints and immutable-caches them, and a licensed commercial OTF should
 // not be a directly-listable static asset.
 //
-// METRIC CAVEAT: the substitute is wider than a display grotesque at 900 with
-// -0.02em tracking. Never build a layout that depends on display text fitting
-// on one line (DESIGN.md's CoverArt title uses `nowrap` — do not port that).
-// Every heading must wrap gracefully so swapping in real Bernabeu changes
-// nothing but the glyphs.
-export const display = Archivo({
+// METRIC CAVEAT: both substitutes are wider than Bernabeu at 900 with -0.02em
+// tracking. Never build a layout that depends on display text fitting on one
+// line (DESIGN.md's CoverArt title uses `nowrap` — do not port that). Every
+// heading must wrap gracefully so swapping in real Bernabeu changes nothing
+// but the glyphs.
+export const heading = Outfit({
   subsets: ["latin"],
-  variable: "--font-display-src",
+  variable: "--font-heading-src",
   display: "swap",
 });
 
@@ -85,7 +108,8 @@ export const mono = JetBrains_Mono({
 
 /** Convenience for the root layout. */
 export const fontVariables = [
-  display.variable,
+  statement.variable,
+  heading.variable,
   body.variable,
   hyper.variable,
   mono.variable,

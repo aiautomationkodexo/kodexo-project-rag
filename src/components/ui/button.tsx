@@ -13,8 +13,11 @@ export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
  *   border  = 1px n300 (the "rule" tier — a control is more than a divider)
  *   radius  = --radius-box (2px, everywhere, no exceptions)
  *   padding = the table cell measure, 8px 11px
- *   focus   = 2px n800 OUTLINE, never a ring (ring-* compiles to box-shadow,
- *             and principle 6 forbids shadows) — inherited from :focus-visible
+ *   focus   = 2px n800 OUTLINE, never a `ring`. Elevation is now allowed
+ *             (Identity v1.0 ships three shadows) but focus is still an
+ *             outline: `ring-*` compiles to a `box-shadow`, which would then
+ *             collide with the card's own `elev-*` on any focused control
+ *             inside one. Inherited from :focus-visible.
  *
  * RED RATION: `primary` is the only red-filled variant, and a view gets ONE.
  * `danger` is deliberately NOT red-filled — destructive actions are rare and
@@ -43,7 +46,10 @@ export function Button({
   return (
     <button
       type={type}
-      className={`inline-flex items-center justify-center rounded-box font-body transition-colors disabled:cursor-not-allowed disabled:border-n200 disabled:bg-n100 disabled:text-n400 ${VARIANTS[variant]} ${sizing} ${className}`}
+      // `gap-[6px]` rather than a margin on the icon: it applies only when
+      // there is more than one child, so an icon-only or text-only button
+      // needs no variant and gains no stray space.
+      className={`inline-flex items-center justify-center gap-[6px] rounded-box font-body transition-colors disabled:cursor-not-allowed disabled:border-n200 disabled:bg-n100 disabled:text-n400 ${VARIANTS[variant]} ${sizing} ${className}`}
       {...props}
     />
   );

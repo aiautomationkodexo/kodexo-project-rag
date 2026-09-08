@@ -42,7 +42,7 @@ export async function proxy(request: NextRequest) {
 
   // Signed in and heading to /login → send them to the app.
   if (claims && pathname === "/login") {
-    return redirectPreservingCookies(request, response, "/projects");
+    return redirectPreservingCookies(request, response, "/dashboard");
   }
 
   if (!claims && !isPublic(pathname)) {

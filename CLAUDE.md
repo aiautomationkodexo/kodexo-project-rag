@@ -63,6 +63,16 @@ No test runner is configured yet. PRD §14 defines acceptance criteria per task;
 
 `src/app/`, `src/lib/`, `src/proxy.ts`, with `@/*` → `./src/*`.
 
+**Every signed-in page lives in the `src/app/(app)/` route group**, whose
+`layout.tsx` renders the shell. A route group adds no URL segment, so
+`/projects` is still `/projects`. `/login`, `/api`, `/auth`, `error.tsx` and
+`not-found.tsx` sit OUTSIDE it — the first is the app's full-bleed cover, and
+the rest must render without a rail (and without the `getCurrentUser()` the
+rail needs). Pages no longer import `AppShell` themselves; doing so nests two
+shells. No auth check belongs in that layout: layouts do not re-run on every
+navigation, so a guard there would not be re-evaluated — each page calls
+`requireClaim` itself.
+
 **Prefix every path in PRD §2 with `src/`.** The PRD puts `app/` and `lib/` at the project root with `@/*` → root; this repo keeps the scaffold's `src/`, and Next 16 requires `proxy.ts` inside `src/` when that layout is used.
 
 ## Deviations from the PRD
@@ -206,17 +216,76 @@ with the merge; that is only possible because the work is already in an RPC.
 
 ## Design system
 
-Print-first, translated in `src/app/globals.css`. `--text-*`, `--radius-*` and `--font-*` are reset to `initial`, so `text-sm` / `rounded-lg` / `font-sans` **do not exist** — that is deliberate enforcement, not an oversight.
+**The source of truth is Kodexo Labs Visual Identity v1.0** (`tokens.css`, generated from `sot/visual-identity.tokens.json`, marked *"DO NOT modify locally"*). `src/app/globals.css` transcribes it. **[DESIGN.md](DESIGN.md) is the older print-first derivation and is superseded wherever the two disagree** — it remains useful for component anatomy (§5) and page architecture (§6), not for tokens.
+
+What v1.0 changed, and what it did not:
+
+| | DESIGN.md (was) | Identity v1.0 (now) |
+|---|---|---|
+| Radius | flat 2px, "no pills" | `sm 6` / `md 10` / `lg 14` / `xl 20` / `pill`. `--radius-box` is an alias for `sm` and stays the default |
+| Elevation | principle 6, banned | `--shadow-sm/md/lg`, exposed as `elev-sm/md/lg` |
+| H1 | Bernabeu | **Unbounded 900** (statement), set on `h1` globally |
+| H2–H4 | Bernabeu → Archivo | Bernabeu → **Outfit** — the SOT names its own fallback, so the substitute is specified rather than improvised |
+| Kicker | Manrope uppercase | `.mono-kicker` → the `kicker` utility (JetBrains Mono, 12px, .12em) |
+| Semantic | bg + text pair | bg + **border** + text triple; `tone-*` sets all three |
+| Spacing | pt conversions (11/15/17/35px) | 4px grid; the named roles resolve onto it |
+
+Unchanged: red is rationed to one run per view, all chrome comes from the neutral ramp, semantic values are used as locked sets, and colours are never hand-picked.
+
+**Light-only is now a scoping decision, not a limitation.** v1.0 *does* define `[data-theme="dark"]`; this app declines it for now and says so in `globals.css`. Turning it on is: copy that block into `:root[data-theme="dark"]`, add a toggle. No call site changes — every colour is already a token.
+
+`--text-*` and `--font-*` are still reset to `initial`, so `text-sm` / `font-sans` **do not exist**. `--radius-*` is now populated from the SOT rather than deleted, so `rounded-sm/md/lg/xl/pill` resolve to *our* scale — but `rounded-full`, `rounded-none` and Tailwind's own numeric steps still do not exist.
+
+**Elevation is rationed like red.** `elev-sm` on cards and stat tiles; `elev-md` only for a surface floating alone on an empty page (`/login`, `error`, `not-found`). Toolbars, table rows and skeletons get none — a control surface is not a raised one. A hand-written `box-shadow` value remains a review failure; the three tokens are the only legal elevations.
 
 - **Red is rationed: one red run per view** (the single primary action) plus chrome. `PageHeader`'s `action` is one slot, structurally.
-- **Locked Tier 3 pairs** are only reachable through `tone-ok` / `tone-err` / … utilities, which set background and text together. `status-chip.tsx` is the only place a status picks a tone; `tone-warn` is deliberately unallocated so "documents failed" still means something.
-- **No shadows, ever.** `focus:ring-*` compiles to `box-shadow` and is banned; focus is an `outline`.
-- **`rounded-box` (2px) everywhere.** No pills.
+- **Locked semantic sets** are only reachable through `tone-ok` / `tone-err` / … utilities, which set background, border and text together. `status-chip.tsx` is the only place a status picks a tone; `tone-warn` is deliberately unallocated so "documents failed" still means something.
+- **Focus is an `outline`, never a `ring`.** Elevation is legal now, but `focus:ring-*` compiles to `box-shadow` and would overwrite the `elev-*` of any card a focused control sits inside — one property, two owners.
+- **`rounded-box` (= `sm`, 6px) is the default.** Reach past it only for the SOT's named cases: `md` for modals/popovers, `pill` for chips and avatars.
 - **Summary ordinals are `n400`, not red** — a rationed colour cannot be applied to an unbounded, model-generated list.
-- **Fonts:** Bernabeu is commercial and absent; `src/lib/fonts.ts` substitutes Archivo behind a one-export swap seam (`next/font/local` throws at build on a missing file, so the seam must be a module boundary). Anton is loaded solely for `/login`, the app's one "cover".
-- **Light only.** The Tier 3 pairs have no dark half, and inventing eight hexes would violate "locked upstream".
+- **Fonts:** five roles in `src/lib/fonts.ts` — statement (Unbounded 900, `h1` only), heading (Bernabeu → **Outfit**), body (Manrope), hyper (Anton), mono (JetBrains Mono, also the `kicker` utility). Bernabeu is commercial and absent; Outfit is the SOT's *own* named fallback, sitting behind a one-export swap seam (`next/font/local` throws at build on a missing file, so the seam must be a module boundary). Anton is loaded solely for `/login`, the app's one "cover" — if that composition goes, delete the family. `font-display` survives only as an alias for `font-heading`; new code says `font-heading`.
+- **Light only — by choice.** Identity v1.0 *does* define a dark theme; shipping the variables with no control to flip them would be dead CSS, and shipping them on `prefers-color-scheme` would hand every user an unreviewed theme. See the note in `globals.css`.
 
-Review greps: `shadow-|ring-|box-shadow` → 0; `rounded-` other than `rounded-box` → 0; Tier 3 hexes outside `globals.css` → 0.
+Review greps: `box-shadow` outside a `var(--shadow-*)` → 0; `class="…shadow-|ring-…"` → 0; radius classes outside the SOT scale (`rounded-box|sm|md|lg|xl|pill`) → 0; semantic hexes outside `globals.css` → 0.
+
+**Tailwind v4 extracts class-name candidates from comments too.** Writing the
+bare word *shadow* or *ring* in prose — even in the comment that documents the
+ban — emits a real `.shadow{}` / `.ring{}` utility into the bundle. Backtick
+them. (Both also appear in a stock v4 build regardless of source, so the greps
+above are over `src/`, not over the compiled CSS.)
+
+### The dashboard shell (added after T8)
+
+The print system's A4 running head became a 240px rail (`--spacing-rail`), and
+the A4 text block (`--container-doc`, 880px) is no longer the app measure —
+`--container-app` (1400px) is. `--container-doc` and `--container-prose` remain
+correct for READING surfaces: the login cover, and the summary column on a
+project page.
+
+- **The rail is `fixed` with a matching `md:pl-rail` on the content.** As a
+  flex sibling it scrolls away with a long table, which defeats persistent nav
+  on exactly the pages that need it.
+- **Active nav is n100 + a 2px red edge, never a red fill.** The fill is the
+  reference dashboards' idiom and it spends the view's red ration on chrome.
+- **Stat tiles are neutral.** The references tint each tile a different hue;
+  Tier 4 is "one hue per document" and Tier 3 pairs are reserved for real
+  states, so a five-colour tile row would spend the whole semantic palette on
+  decoration. Hierarchy is typographic — display 900 at `--text-section`.
+  `StatCard`'s `tone` tints the VALUE only, for the one tile that reports an
+  actual problem.
+- **Lists are real `<table>`s** (`src/components/ui/table.tsx`), not stacked
+  `<article>`s. **Search results are the exception** and keep the article form:
+  a result must show the matched snippet as evidence, which no cell can hold —
+  and the no-sort / no-score / no-highlight rules still apply there.
+- **Pagination is links, never buttons**, so paging stays bookmarkable and in
+  the back-history. Page 1 is the bare URL with no `?page=1`.
+- **`listProjects` / `listUsers` clamp an over-range `?page=` themselves** by
+  re-querying the last real page. A caller cannot clamp first because the total
+  is unknown until the query returns. Filter forms deliberately omit `page`, so
+  changing a filter drops the stale offset instead of landing on an empty page.
+- **Search cannot paginate.** `search_projects` takes a single `match_limit`
+  and returns RRF order; there is no stable offset. `?per=` doubles as "how
+  many results to ask for".
 
 <!-- BEGIN:nextjs-agent-rules -->
 

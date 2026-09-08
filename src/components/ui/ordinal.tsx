@@ -13,7 +13,7 @@ export function Ordinal({ n, className = "" }: { n: number; className?: string }
   return (
     <span
       aria-hidden="true"
-      className={`mr-[8px] font-display text-[13px] font-extrabold leading-none text-n400 ${className}`}
+      className={`mr-[8px] font-heading text-[13px] font-extrabold leading-none text-n400 ${className}`}
     >
       {String(n).padStart(2, "0")}
     </span>

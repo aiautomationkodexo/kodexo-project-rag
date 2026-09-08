@@ -10,9 +10,9 @@ import type { InputHTMLAttributes } from "react";
  *   disabled  n400 accent + n400 label + not-allowed cursor, with `title`
  *             carrying the reason (a disabled control with no explanation is
  *             just a broken control).
- *   focus     inherited `outline` from :focus-visible. Never a ring —
- *             focus:ring-* compiles to box-shadow, and principle 6 forbids
- *             shadows.
+ *   focus     inherited `outline` from :focus-visible. Never a `ring` —
+ *             `focus:ring-*` compiles to a `box-shadow`, which would collide
+ *             with the `elev-*` on any card the control sits in.
  *   hit area  the <label> wraps the input, so the whole row is clickable.
  */
 export function Checkbox({

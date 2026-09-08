@@ -1,5 +1,23 @@
 # Kodexo Labs — Design System
 
+> [!IMPORTANT]
+> **Partially superseded by Kodexo Labs Visual Identity v1.0** (`tokens.css`,
+> from `sot/visual-identity.tokens.json`). Where this document and the SOT
+> disagree, **the SOT wins** — it is the versioned, generated artefact; this is
+> a hand-written derivation of a proposal export that predates it.
+>
+> Superseded here: **principle 5** (near-zero radius — v1.0 ships a 6→20px
+> scale plus a pill), **principle 6** (no shadows — v1.0 ships three
+> elevations), **§2.1's families** (H1 is Unbounded; Bernabeu's named fallback
+> is Outfit, not a face chosen by eye), **§3's Tier 3 pairs** (each semantic
+> colour is a bg/border/text *triple*), **§4's pt-derived spacing** (a 4px
+> grid), and **§9's "no dark palette"** (v1.0 defines one; this app declines to
+> ship a toggle, which is a product decision, not a palette gap).
+>
+> Still authoritative and still worth reading: the red ration (principle 1),
+> neutrals-only chrome (2), one illustration hue (4), the component anatomy in
+> §5, and the page architecture in §6.
+
 **Source:** `Kodexo Labs Proposal.html` (Claude Design export, bundle namespace `KodexoLabsDesignSystem_aac98c`, bundle format 4).
 **Upstream lock:** Visual Identity v1.0. Color values are declared "locked upstream — do not edit."
 **Origin medium:** print-first (A4, 210 × 297 mm). All document sizes are authored in `pt`; §9 covers the web/Tailwind translation.

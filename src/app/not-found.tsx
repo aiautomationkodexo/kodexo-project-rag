@@ -1,19 +1,27 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { IconSearch } from "@/components/ui/icon";
 
+/**
+ * The root not-found. It renders OUTSIDE the (app) group's layout, so it has
+ * no rail — which is correct: a 404 can be reached signed out, and rendering
+ * a rail would mean querying a user that may not exist.
+ */
 export default function NotFound() {
   return (
-    <main className="mx-auto flex w-full max-w-doc flex-1 flex-col justify-center px-shell py-section">
-      <h1 className="mb-panel-y font-display text-section font-black tracking-title">
-        Not found
-      </h1>
-      <p className="mb-section max-w-prose text-body text-n500">
-        That page does not exist, or it has been deleted.
-      </p>
-      <div>
-        <Link href="/projects">
-          <Button>Back to projects</Button>
-        </Link>
+    <main className="flex min-h-full flex-1 items-center justify-center bg-n50 px-shell py-section">
+      <div className="elev-md w-full max-w-form rounded-md border border-n200 bg-white px-section py-section">
+        <EmptyState
+          icon={<IconSearch />}
+          title="Page not found"
+          body="That page does not exist, or it has been deleted."
+          action={
+            <Link href="/dashboard">
+              <Button>Back to dashboard</Button>
+            </Link>
+          }
+        />
       </div>
     </main>
   );
