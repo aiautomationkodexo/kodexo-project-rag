@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/chrome/page-header";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Chip } from "@/components/ui/chip";
 import { StatusChip } from "@/components/ui/status-chip";
-import { can, requireClaim } from "@/lib/auth/claims";
+import { can, canOn, requireUser } from "@/lib/auth/claims";
 import { disclosure } from "@/lib/projects/disclosure";
 import { ENGAGEMENT_LABELS, isEngagementType } from "@/lib/projects/validate";
 import { linkLabel } from "@/lib/projects/links";
@@ -34,7 +34,18 @@ function Meta({ label, children }: { label: string; children: React.ReactNode })
 }
 
 export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
-  const user = await requireClaim("projects:view");
+  /*
+   * requireUser(), NOT requireClaim("projects:view") — and this is the single
+   * most important line of the scoped-access change.
+   *
+   * requireClaim REDIRECTS when the global claim is missing, so a grants-only
+   * user would be bounced off a project they can legitimately see, before RLS
+   * ever got a chance to answer. RLS is the authority here: getProject returns
+   * null for a project this user cannot see (projects_select_global OR
+   * projects_select_scoped), and notFound() below is the correct response to
+   * that. A claim check in front of it is not defence in depth, it is a bug.
+   */
+  const user = await requireUser();
   const { id } = await props.params;
 
   const data = await getProject(id);
@@ -43,7 +54,10 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
   const { project, documents, tags, createdBy, updatedBy, links, client } =
     data;
   const summary = asSummary(project.summary);
-  const canUpdate = can(user, "projects:update");
+  // Scoped: a grants-only editor must see the Edit form for their project.
+  const canUpdate = await canOn(user, "projects:update", id);
+  // NOT scoped. Disclosure terms are a legal determination, and project_grants
+  // cannot carry projects:set-nda (see 0018's CHECK).
   const canSetNda = can(user, "projects:set-nda");
   const d = disclosure(project.nda_status);
   const engagement =

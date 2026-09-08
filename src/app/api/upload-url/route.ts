@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCurrentUser } from "@/lib/auth/claims";
 import { can } from "@/lib/auth/claim-set";
+import { canOn } from "@/lib/auth/claims";
 import { BUCKET } from "@/lib/pipeline/extract";
 import {
   classifyFile,
@@ -53,9 +54,23 @@ export async function POST(request: NextRequest) {
   }
 
   const intent = body.intent === "add" ? "add" : "create";
-  const claim = intent === "add" ? "projects:update" : "projects:create";
-  if (!can(user, claim)) {
-    return Response.json({ error: `Missing permission: ${claim}` }, { status: 403 });
+
+  /*
+   * `create` is checked here; `add` is checked below, once projectId is known.
+   *
+   * projects:create cannot be scoped to a project that does not exist yet, so
+   * the flat check is correct for that intent. For `add` a flat
+   * projects:update check would reject every scoped editor, and it also
+   * proved the wrong thing before: it authorized on projects:update while the
+   * project read below only proves projects:view, so a scoped viewer could
+   * mint an upload URL. The document insert would then fail, but failing later
+   * and less clearly is not a design.
+   */
+  if (intent === "create" && !can(user, "projects:create")) {
+    return Response.json(
+      { error: "Missing permission: projects:create" },
+      { status: 403 },
+    );
   }
 
   const filename = String(body.filename ?? "");
@@ -85,7 +100,19 @@ export async function POST(request: NextRequest) {
       .is("deleted_at", null)
       .maybeSingle();
     if (!project) {
+      // Covers the scoped case for free: projects_select_scoped means an
+      // out-of-scope project reads as absent, so this 404 is also the
+      // "you cannot see it" answer — and it does not distinguish the two,
+      // which is the right disclosure posture.
       return Response.json({ error: "Project not found." }, { status: 404 });
+    }
+
+    // Visibility is not enough: the caller is about to attach a document.
+    if (!(await canOn(user, "projects:update", projectId))) {
+      return Response.json(
+        { error: "Missing permission: projects:update" },
+        { status: 403 },
+      );
     }
 
     // Courtesy pre-check so the user is told before uploading 50 MB. The

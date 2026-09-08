@@ -68,6 +68,47 @@ export function isClaim(value: string): value is Claim {
 }
 
 /**
+ * The claims a `project_grants` row may legally carry.
+ *
+ * MUST agree with project_grants_claim_check in migration 0018 —
+ * tests/scoped-claims.test.mts parses the migration and asserts set equality,
+ * because a claim TS thinks is grantable but SQL rejects fails as an opaque
+ * 23514 nowhere near the cause.
+ *
+ * `projects:create` is absent because a grant names an EXISTING project.
+ * `projects:delete` is absent by decision: highest blast radius, and
+ * soft_delete_project was the worst pre-existing gap in the schema.
+ */
+export const SCOPED_CLAIMS = [
+  "projects:view",
+  "projects:update",
+] as const satisfies readonly Claim[];
+
+export type ScopedClaim = (typeof SCOPED_CLAIMS)[number];
+
+export function isScopedClaim(claim: Claim): claim is ScopedClaim {
+  return (SCOPED_CLAIMS as readonly Claim[]).includes(claim);
+}
+
+/**
+ * Grant bundles, the per-project analogue of PRESETS.
+ *
+ * EVERY BUNDLE INCLUDES projects:view, and that is not cosmetic. A row
+ * granting projects:update WITHOUT a matching view row produces a user who
+ * can write a project they cannot read: the UPDATE passes
+ * projects_update_scoped, then Postgres checks the post-image against the
+ * SELECT policies (0006's mechanism) and it fails with a confusing "new row
+ * violates row-level security policy". No table constraint can express that
+ * cross-row invariant, so the UI grants a bundle instead.
+ */
+export const GRANT_PRESETS = {
+  Viewer: ["projects:view"],
+  Editor: ["projects:view", "projects:update"],
+} as const satisfies Record<string, readonly ScopedClaim[]>;
+
+export type GrantPresetName = keyof typeof GRANT_PRESETS;
+
+/**
  * The subject of an authorization decision. Structurally satisfied by
  * `CurrentUser` from ./claims, but declared here so this module stays free of
  * server imports.

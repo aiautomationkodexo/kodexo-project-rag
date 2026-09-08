@@ -9,7 +9,7 @@ import { IconInbox, IconPlus, IconSearch } from "@/components/ui/icon";
 import { Pagination } from "@/components/ui/pagination";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Table, TBody, TD, TEmpty, TH, THead, TR, TableWrap } from "@/components/ui/table";
-import { can, requireClaim } from "@/lib/auth/claims";
+import { can, requireProjectAccess } from "@/lib/auth/claims";
 import { formatDate } from "@/lib/format";
 import { listIndustries, listProjects, searchProjects } from "@/lib/projects/queries";
 import { pageParams, param } from "@/lib/pagination";
@@ -20,7 +20,10 @@ import { SearchResult } from "./search-result";
 export const dynamic = "force-dynamic";
 
 export default async function ProjectsPage(props: PageProps<"/projects">) {
-  const user = await requireClaim("projects:view");
+  // "Has any project access", not "holds the global claim": a grants-only
+  // user must reach this page. The gate stays — an empty list is worse than a
+  // redirect — it just asks the right question now.
+  const user = await requireProjectAccess();
   const searchParams = await props.searchParams;
 
   const q = param(searchParams.q).trim();

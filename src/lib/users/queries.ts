@@ -122,9 +122,48 @@ export async function getUser(id: string) {
     .select("claim")
     .eq("user_id", id);
 
+  /*
+   * Per-project grants, joined to the project title so the panel can show a
+   * name rather than a UUID.
+   *
+   * Readable via grants_select_admin (this page already requires users:view).
+   * The projects join is subject to the reader's OWN project visibility, so a
+   * title reads null for a project the ADMIN cannot see — rendered as the bare
+   * id rather than hidden, because the grant itself is a fact this admin is
+   * entitled to see and manage even when the project is outside their scope.
+   */
+  const { data: grantRows } = await supabase
+    .from("project_grants")
+    .select("project_id, claim, granted_at, projects(title)")
+    .eq("user_id", id)
+    .order("granted_at", { ascending: true });
+
+  // One row per project, claims collapsed — the panel grants and revokes
+  // bundles, so a claim-per-row list would misrepresent the unit of action.
+  const grants = new Map<
+    string,
+    { projectId: string; title: string | null; claims: Claim[] }
+  >();
+
+  for (const row of grantRows ?? []) {
+    const existing = grants.get(row.project_id);
+    const title =
+      (row.projects as unknown as { title: string } | null)?.title ?? null;
+    if (existing) {
+      existing.claims.push(row.claim as Claim);
+    } else {
+      grants.set(row.project_id, {
+        projectId: row.project_id,
+        title,
+        claims: [row.claim as Claim],
+      });
+    }
+  }
+
   return {
     profile,
     claims: new Set((claimRows ?? []).map((r) => r.claim as Claim)),
+    grants: [...grants.values()],
   };
 }
 

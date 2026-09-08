@@ -5,7 +5,11 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getCurrentUser, assertClaim } from "@/lib/auth/claims";
+import {
+  getCurrentUser,
+  assertClaim,
+  assertCanOn,
+} from "@/lib/auth/claims";
 import { dispatch } from "@/lib/pipeline/dispatch";
 import { contentHash } from "@/lib/pipeline/process-document";
 import { MIN_CHUNK } from "@/lib/pipeline/chunk";
@@ -278,17 +282,27 @@ export async function updateProject(
   const user = await getCurrentUser();
   if (!user) return { error: "Your session has expired. Sign in again." };
 
-  try {
-    assertClaim(user, "projects:update");
-  } catch {
-    return { error: "You do not have permission to edit projects." };
-  }
-
   const projectId = String(formData.get("projectId") ?? "");
   const title = String(formData.get("title") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
   const meta = parseMeta(formData);
   if (!projectId) return { error: "Missing project id." };
+
+  /*
+   * The check runs AFTER projectId is parsed, deliberately — it needs the id.
+   * A bare assertClaim("projects:update") here would reject every scoped
+   * editor outright, so this REPLACES that check rather than supplementing it.
+   *
+   * RLS remains the boundary: projects_update_scoped / documents_*_scoped are
+   * what actually decide this. Without the check the write would simply match
+   * zero rows and PostgREST would report success having done nothing — a
+   * silent no-op, which is worse for the user than an error.
+   */
+  try {
+    await assertCanOn(user, "projects:update", projectId);
+  } catch {
+    return { error: "You do not have permission to edit this project." };
+  }
 
   const supabase = await createClient();
 
@@ -432,14 +446,24 @@ export async function addFilesToProject(
   const user = await getCurrentUser();
   if (!user) return { error: "Your session has expired. Sign in again." };
 
-  try {
-    assertClaim(user, "projects:update");
-  } catch {
-    return { error: "You do not have permission to add documents." };
-  }
-
   const projectId = String(formData.get("projectId") ?? "");
   if (!projectId) return { error: "Missing project id." };
+
+  /*
+   * The check runs AFTER projectId is parsed, deliberately — it needs the id.
+   * A bare assertClaim("projects:update") here would reject every scoped
+   * editor outright, so this REPLACES that check rather than supplementing it.
+   *
+   * RLS remains the boundary: projects_update_scoped / documents_*_scoped are
+   * what actually decide this. Without the check the write would simply match
+   * zero rows and PostgREST would report success having done nothing — a
+   * silent no-op, which is worse for the user than an error.
+   */
+  try {
+    await assertCanOn(user, "projects:update", projectId);
+  } catch {
+    return { error: "You do not have permission to add documents here." };
+  }
 
   const uploaded = parseUploaded(formData.get("files"));
   if (uploaded.length === 0) return { error: "Attach at least one document." };
@@ -596,18 +620,21 @@ export async function setDocumentVisibility(
   const user = await getCurrentUser();
   if (!user) return { error: "Your session has expired. Sign in again." };
 
-  try {
-    assertClaim(user, "projects:update");
-  } catch {
-    return { error: "You do not have permission to edit projects." };
-  }
-
   const projectId = String(formData.get("projectId") ?? "");
   const documentId = String(formData.get("documentId") ?? "");
   const visibility = String(formData.get("visibility") ?? "");
   if (!projectId || !documentId) return { error: "Missing document id." };
   if (visibility !== "indexed" && visibility !== "no_index") {
     return { error: "Unknown visibility." };
+  }
+
+  // Scoped, as in updateProject. Note the chunk delete below uses the ADMIN
+  // client, which bypasses RLS entirely — so for that write this check is not
+  // merely a nicer error, it is the only authorization there is.
+  try {
+    await assertCanOn(user, "projects:update", projectId);
+  } catch {
+    return { error: "You do not have permission to edit this project." };
   }
 
   const supabase = await createClient();
