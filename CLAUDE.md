@@ -194,13 +194,35 @@ committed, so throwing would report failure for work that succeeded — and in
 gone. `merge_tech_tag` writes its own audit row in SQL instead, which is atomic
 with the merge; that is only possible because the work is already in an RPC.
 
+## Fields, disclosure, client info, links, visibility (0012–0016)
+
+**`disclosure()` in [src/lib/projects/disclosure.ts](src/lib/projects/disclosure.ts) is the only interpreter of `nda_status`.** It fails closed: NULL, `Select`, `Needs Review` and any unrecognised value all resolve to `{mayUseBrand: false, mayUseClientName: false}`. A project with no NDA answer behaves exactly like `Permanently Excluded`. Nobody switches on the status string anywhere else — a second interpretation site is how the summariser and a future MCP layer come to disagree about whether a client may be named.
+
+**`nda_status` is not writable through the API at all.** `0013` revokes the table-level UPDATE grant on `projects` and re-grants every column *except* it, so a `PATCH` carrying `nda_status` gets 42501; the only write path is `set_nda_status()`. An `assertClaim` alone would have been decoration — `projects_update` checks the *claim*, not the *column*, which is structurally the escalation `0007` closed for `profiles.is_super_admin`. **Consequence: any column a later migration adds to `projects` is un-updatable until it is added to `0013`'s re-grant list.** That is `0007`'s fail-closed property, and SETUP.md §2.1 has a query that finds the omission.
+
+**The client-name suppression in the summariser is CONDITIONAL, and it must stay that way.** `SUMMARY_SYSTEM` rule 6 mandates reproducing testimonials verbatim *"with attribution when known"* — and attribution is naming. A blanket "never name the client" rule contradicts a load-bearing rule that `test:llm` asserts, and contradictory instructions on the same string produce unpredictable *partial* redaction, which is worse than none because it looks like a guarantee. `CLIENT_ANONYMITY_RULE` is appended only when `disclosure().mayUseClientName` is false, and it resolves the conflict explicitly: quote bodies stay verbatim, attribution moves to role. `generateSummary`'s flag **defaults to false** so a caller that forgets it gets the anonymised prompt.
+
+**It is a mitigation, not a control.** The model still receives the client's name in the corpus, because `raw_text` genuinely contains it. The structural guarantee is that `project_client` is never read in the pipeline at all.
+
+**`project_client` is a separate table because RLS is row-level and cannot hide one column.** Never join it into anything in `src/lib/pipeline/*` — the admin client is in use there, so RLS gives **zero** protection and the absence of the join is the whole enforcement. **Honest limitation, do not overstate it:** `documents.raw_text` still contains client names, therefore so do `chunks.text` and the embeddings, so `search_projects` can return a snippet naming the client to any `projects:view` holder. What holds is *"the structured field is not retrievable; the prose may still mention the client."* Never call it confidentiality.
+
+**`no_index` needs TWO enforcement points and the chunk skip is not sufficient.** A `no_index` document still reaches `status='done'` with `raw_text` populated (§15.2 requires that), so without the `.neq("visibility", "no_index")` filter on `finalizeProject`'s corpus query its text is still summarised into `summary_text` — **which is embedded**. Skipping `chunkText`/`embedBatch` in `processDocument` closes the chunk route and leaves the summary route wide open.
+
+**The `no_index` skip in `processDocument` must still mark the document `done` and still reach `maybeFinalize`.** `claim_finalize` counts `queued`/`processing` as pending, so any non-terminal status there holds the project in `processing` forever — no summary, nothing logged. It must also *delete* existing chunks, not merely skip inserting them.
+
+**`documents.visibility` is two values, not four.** `internal`/`public`/`on_request` were specified for an MCP layer that does not exist; storing them would render a control in a `<select>` that implies an effect it does not have. Adding them later is a drop-and-add of a named CHECK.
+
+**Links are never fetched server-side.** A user-supplied URL fetched by our server reaches cloud metadata endpoints and every RFC1918 address the runtime can route to, and a blocklist does not work (DNS rebinding, redirect chains, IPv6-mapped and decimal IP encodings). This is also why titles are **not** AI-filled: with no fetch the model has only the URL string, and for an opaque URL it produces a confabulated title that becomes the link's *only* searchable text. `parseLinks` allowlists `http`/`https` — React escapes text but does **not** sanitise `href`, so a stored `javascript:` URL is stored XSS.
+
+**Both new vocabularies have SQL↔TS drift tests** (`tests/disclosure.test.mts`, `tests/validate.test.mts`), following `alias-key.test.mts`. The em dashes in `nda_status` are U+2014 and load-bearing: a hyphen in either copy means the form offers a value the CHECK rejects, surfacing as an opaque 23514 nowhere near the cause.
+
 ## Constraints that bite silently
 
 - **§15.12 lives in `src/app/projects/[id]/summary-sections.tsx`** — the only component touching `summary.sections`. No `switch`, no `if`, no lookup keyed on `s.key`; array order unconditionally; a `.sort()` is a bug.
 - **Never `.sort()` in the search render path.** `queries.ts` returns RRF order; re-sorting destroys the ranking.
 - **Never render the search `score`** — an RRF sum in the 0.008–0.033 range. Any percentage or bar fabricates calibration.
 - **No highlighting on snippets.** A top result can share zero words with the query (that *is* T4's acceptance criterion), so highlighting would misrepresent the ranking.
-- **§15.10** — `src/lib/projects/queries.ts` uses explicit column lists. `select("*")` is banned there.
+- **§15.10** — `src/lib/projects/queries.ts` uses explicit column lists. `select("*")` is banned there. **A new project column must be added to `getProject`'s select or it arrives `undefined` and renders as "—" — a silent wrong answer, not an error.** Four selects gate the new fields: `getProject` and `LIST_COLUMNS` in queries.ts, `processDocument`'s document select, and `finalizeProject`'s project select. Supabase's typed client turns a *missing* column into a compile error, which is what makes this survivable; a column merely absent from a list does not fail.
 - **Each `?q=` render costs an OpenAI embedding.** The filter form submits explicitly; never debounce on keypress.
 - **`profiles` queries must filter `.is("deleted_at", null)` in the app layer.** Unlike `projects_select`, the `profiles_select` policy never references `deleted_at`, so RLS will happily return soft-deleted users.
 - **Claim writes go through the USER's client, never the admin client.** The per-row `has_claim(uid, claim)` arm of `claims_insert`/`claims_delete` *is* the "cannot grant what you don't hold" guarantee; the admin client bypasses RLS and silently voids it.

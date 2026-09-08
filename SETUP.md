@@ -215,6 +215,131 @@ Link shows the `token_hash` markup; and **SMTP shows a real username and a non-e
 password** — if the username reads literally `env(SMTP_USER)`, the CLI did not
 substitute it and those fields must be set in the dashboard by hand.
 
+### 2.1 Verify `0012`–`0016` (fields, NDA, client info, links, visibility)
+
+These five migrations are additive, but three of them change an access posture
+and one replaces `search_projects`. `npm test` covers the pure logic (65 tests,
+including the SQL-vs-TS drift checks for both new vocabularies); everything
+below needs the live database.
+
+**The column lockdown is the highest-risk item here.** `0013` revokes the
+table-level UPDATE grant on `projects` and re-grants every column *except*
+`nda_status`. A column missing from that re-grant list is a silent inability to
+save that field, surfacing as a 42501 only when someone edits it.
+
+```sql
+-- 1. Every new column exists, with the right nullability and defaults.
+select column_name, data_type, is_nullable, column_default
+from information_schema.columns
+where table_schema = 'public' and table_name = 'projects'
+  and column_name in ('engagement_type','start_date','end_date',
+                      'team_size','nda_status')
+order by column_name;
+-- All five nullable, no defaults.
+
+select column_name, is_nullable, column_default
+from information_schema.columns
+where table_schema='public' and table_name='documents'
+  and column_name='visibility';
+-- NOT NULL, default 'indexed'. Nullable here would make
+-- `visibility <> 'no_index'` drop every pre-existing row from search.
+
+-- 2. THE GRANT LIST. Compare against the columns that actually exist —
+--    this returns anything writable in the app but NOT re-granted by 0013.
+select c.column_name
+from information_schema.columns c
+where c.table_schema='public' and c.table_name='projects'
+  and c.column_name not in ('id','created_by','created_at','updated_at','nda_status')
+  and not exists (
+    select 1 from information_schema.column_privileges p
+     where p.table_schema='public' and p.table_name='projects'
+       and p.grantee='authenticated' and p.privilege_type='UPDATE'
+       and p.column_name = c.column_name);
+-- MUST be empty. A row here is a column nobody can save.
+
+-- And nda_status must NOT be writable directly:
+select count(*) from information_schema.column_privileges
+where table_schema='public' and table_name='projects'
+  and grantee='authenticated' and privilege_type='UPDATE'
+  and column_name='nda_status';
+-- Expect 0. If it is 1, the definer RPC is decoration and any
+-- projects:update holder can PATCH disclosure terms.
+
+-- 3. The em dash round-trips. U+2014, not a hyphen — a mismatch between the
+--    CHECK and src/lib/projects/disclosure.ts means the form offers a value
+--    the database rejects. tests/disclosure.test.mts asserts the TS side.
+select octet_length('NDA Hold — Nothing Can Be Used') as bytes,
+       length('NDA Hold — Nothing Can Be Used')       as chars;
+-- bytes MUST exceed chars (32 vs 30). Equal means the dash was normalised.
+
+-- 4. RLS is enabled on both new tables. A table created without it is
+--    readable by every signed-in user regardless of policies (see 0002).
+select tablename, rowsecurity from pg_tables
+where schemaname='public' and tablename in ('project_client','project_links');
+-- Both true.
+
+-- Both need a SELECT *and* a write policy; select-only makes the table
+-- permanently unwritable through the API.
+select tablename, policyname, cmd from pg_policies
+where schemaname='public' and tablename in ('project_client','project_links')
+order by tablename, policyname;
+-- project_client: _select (SELECT) + _write (ALL)
+-- project_links:  links_select (SELECT) + links_write (ALL)
+
+-- 5. search_projects was actually replaced and excludes no_index.
+select prosrc like '%visible_docs%' as excludes_no_index
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname='public' and p.proname='search_projects';
+-- MUST be true, and BOTH the vec and fts arms must join it — filtering one
+-- leaves the document retrievable through the other.
+select (select count(*) from regexp_matches(prosrc,'join visible_docs','g')) as joins
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and p.proname='search_projects';
+-- Expect 2.
+
+-- 6. The CHECKs reject what they should. Each of these must raise 23514.
+--    Run against a scratch project id.
+-- update projects set engagement_type='retainer'  where id='<id>';  -- 23514
+-- update projects set team_size=0                 where id='<id>';  -- 23514
+-- update projects set start_date='2025-06-01', end_date='2025-01-01'
+--                                                where id='<id>';  -- 23514
+-- update documents set visibility='public'        where id='<doc>'; -- 23514
+--
+-- But an end date with no start date is LEGAL (we may know when something
+-- shipped and not when it began):
+-- update projects set start_date=null, end_date='2025-01-01' where id='<id>';
+```
+
+**As a real non-super-admin user** (not `postgres`, which bypasses everything
+and is the classic way an RLS check passes while the policy is broken):
+
+- Without `projects:view-client-info`: `select * from project_client` returns
+  **zero rows**, not an error. That is what lets `getProject` ask
+  unconditionally with no second copy of the rule in TypeScript.
+- With the claim: the row is visible.
+- Without `projects:set-nda`: `select set_nda_status('<id>','Brand Name Use Only')`
+  raises `Missing permission: projects:set-nda`.
+- With the claim but a nonexistent or soft-deleted project id: raises
+  `Project not found` — the definer function re-proves visibility, because
+  RLS does not apply inside it.
+
+**The `no_index` pipeline path**, end to end. All four assertions matter, and
+the last is the one that catches a `maybeFinalize` regression:
+
+1. Flip a processed document to `no_index` in the UI.
+2. `select raw_text is not null from documents where id='<doc>'` → **true**
+   (§15.2 — this is the only thing making the change reversible).
+3. `select count(*) from chunks where document_id='<doc>'` → **0**.
+4. `select status from projects where id='<id>'` → **`ready`**, not
+   `processing`. A document that never reaches a terminal status holds the
+   project in `processing` forever, with nothing logged anywhere.
+5. Search for a phrase unique to that document → **no hits**.
+6. Flip it back, wait for the sweep or re-dispatch: chunks return, and no
+   Storage read occurred (use the synthetic description document to prove
+   this — its `storage_key` is NULL, so extraction would throw).
+7. A project whose **only** document is `no_index` still reaches `ready` —
+   this exercises `finalizeProject`'s `usable.length === 0` branch.
+
 ---
 
 ## 3. Email (Google SMTP + App Password)
