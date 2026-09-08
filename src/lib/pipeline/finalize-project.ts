@@ -5,11 +5,13 @@ import { aliasKey } from "@/lib/tags/alias-key";
 import {
   embedBatch,
   extractMetadata,
+  extractOutcomes,
   generateSummary,
   renderSummary,
 } from "@/lib/ai/openai";
 import { asSummary, type Summary } from "@/lib/types";
 import { disclosure } from "@/lib/projects/disclosure";
+import { toFeatureRows, toProofPointRows } from "@/lib/projects/outcomes";
 import { toVectorOrNull } from "@/lib/supabase/vector";
 import {
   notifyProjectReady,
@@ -103,6 +105,19 @@ export async function finalizeProject(
 
     const usable = (documents ?? []).filter((d) => d.raw_text?.trim());
     if (usable.length === 0) {
+      // WIPE HERE TOO. This branch returns before the extraction block at the
+      // bottom of the try, so without these two deletes a project whose last
+      // document was removed keeps rendering "Features delivered" for a
+      // corpus that no longer exists — stale model output presented as
+      // current. The summary has the same problem and is left alone
+      // deliberately: §15.8 keeps it additive and a human may have curated
+      // it, whereas these rows are disposable by construction (0017).
+      await admin.from("project_features").delete().eq("project_id", projectId);
+      await admin
+        .from("project_proof_points")
+        .delete()
+        .eq("project_id", projectId);
+
       await admin
         .from("projects")
         .update({ status: "ready" })
@@ -194,6 +209,74 @@ export async function finalizeProject(
         status: "ready",
       })
       .eq("id", projectId);
+
+    // ── Features and proof points — WIPE AND REBUILD (0017) ──────────────
+    //
+    // LAST, and inside its OWN try/catch. Both properties are load-bearing.
+    //
+    // LAST because the summary is the product and this is a secondary view of
+    // the same corpus: a new failure mode must not sit in front of the thing
+    // that must work, and must not delay status='ready' by an extra round
+    // trip. The `projects` update above has already committed.
+    //
+    // ⚠ THE INNER CATCH IS NOT DEFENSIVE PADDING. Without it an OpenAI 500
+    //   here escapes to §15.9's catch, which forces 'ready' (fine) and
+    //   returns "error" — and maybeFinalize SKIPS THE COMPLETION EMAIL on
+    //   "error". So a failure in a secondary extraction would silently
+    //   suppress the "project is ready" mail for a project whose summary
+    //   generated perfectly, and would report an error for writes that have
+    //   already committed. The catch keeps this failure local to the feature
+    //   that caused it.
+    //
+    // ⚠ THE WIPE IS AFTER THE MODEL CALL, INSIDE THE TRY. On failure nothing
+    //   is deleted, so the previously-extracted rows survive and the page
+    //   shows the last good set instead of going blank. Deleting first would
+    //   turn a transient 429 into permanent data loss.
+    try {
+      const outcomes = await extractOutcomes({
+        corpus,
+        title: project.title,
+      });
+
+      // filename → id, for resolving the model's source_filename. Built from
+      // `usable` — the same rows that produced the corpus — so a filename the
+      // model reports is either in here or was invented. Last-wins on a
+      // duplicate filename: two documents CAN share a name and there is no
+      // correct answer, so pick one deterministically rather than dropping
+      // the attribution.
+      const byFilename = new Map(usable.map((d) => [d.filename, d.id]));
+
+      const features = toFeatureRows(projectId, outcomes.features);
+      const proofPoints = toProofPointRows(
+        projectId,
+        outcomes.proof_points,
+        byFilename,
+      );
+
+      // Safe ONLY because no row in either table is human-authored — no
+      // editing UI, no is_reviewed column (0017). An edit affordance would
+      // make this destructive.
+      await admin.from("project_features").delete().eq("project_id", projectId);
+      await admin
+        .from("project_proof_points")
+        .delete()
+        .eq("project_id", projectId);
+
+      if (features.length > 0) {
+        const { error } = await admin.from("project_features").insert(features);
+        if (error) throw new Error(error.message);
+      }
+
+      if (proofPoints.length > 0) {
+        const { error } = await admin
+          .from("project_proof_points")
+          .insert(proofPoints);
+        if (error) throw new Error(error.message);
+      }
+    } catch (error) {
+      // Logged, NEVER rethrown. See the note above.
+      console.error(`[finalize:outcomes] ${projectId}:`, error);
+    }
 
     return "summarized";
   } catch (error) {

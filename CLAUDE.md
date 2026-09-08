@@ -10,7 +10,7 @@ An internal portfolio knowledge base: projects are described or documented, the 
 - **[DESIGN.md](DESIGN.md)** — Kodexo Labs design system. Print-first (A4, `pt`); §9 is the web translation.
 - **[SETUP.md](SETUP.md)** — everything the code cannot do for itself (Supabase dashboard, Vercel, local stack).
 
-Built through PRD §14 **T1–T8**, plus a security migration (`0007`), the §10 completion email, and the §14 additive-summary regression test. Migrations `0009`–`0011` complete T7/T8: sweep recovery + storage lifecycle, the 200 MB media cap, and tag approve/merge.
+Built through PRD §14 **T1–T8**, plus a security migration (`0007`), the §10 completion email, and the §14 additive-summary regression test. Migrations `0009`–`0011` complete T7/T8: sweep recovery + storage lifecycle, the 200 MB media cap, and tag approve/merge. `0012`–`0016` add project metadata, NDA disclosure, client info, links and document visibility; `0017` adds AI-extracted features and proof points. **Latest migration is `0017`.** An earlier `0017_parallel_safe` / `0018_project_grants` pair (per-project scoped access) was reverted in `1ce9dad` and no longer exists — along with the `assertCanOn` / `canOn` helpers it introduced. Do not reference those.
 
 ## Read the shipped Next docs, not your training data
 
@@ -216,8 +216,36 @@ with the merge; that is only possible because the work is already in an RPC.
 
 **Both new vocabularies have SQL↔TS drift tests** (`tests/disclosure.test.mts`, `tests/validate.test.mts`), following `alias-key.test.mts`. The em dashes in `nda_status` are U+2014 and load-bearing: a hyphen in either copy means the form offers a value the CHECK rejects, surfacing as an opaque 23514 nowhere near the cause.
 
+## Features, proof points, removal, regeneration (0017)
+
+**`project_features` and `project_proof_points` are FULL WIPE AND REBUILD on every finalize.** That is safe *only* because no row in either table is human-authored — there is no editing UI and no `is_reviewed` column, deliberately. **Adding an edit or approve affordance makes the wipe destructive**, and an "Approve" button would be a control with no effect: the next regenerate deletes the row it approved. Contrast §15.8, which forbids *deleting* tech tags — a tag is shared vocabulary a human curates through the 0011 queue, so losing one loses work. Different data, different rule.
+
+**`ordinal` exists because `created_at` cannot order these.** A wipe-and-rebuild inserts every row in ONE statement, so `now()` is identical across all of them and `order by created_at` is genuinely non-deterministic — the same class of silent bug as the PRD's unordered `limit 60`. The model emits both lists most-significant-first and that judgement survives nowhere else. `unique (project_id, ordinal)` turns a duplicate into a loud 23505 rather than a silent reorder. **`tests/outcomes.test.mts` asserts both queries order by `ordinal` and neither orders by `created_at`.**
+
+**Filter blanks BEFORE the map that assigns `ordinal`.** Both orderings compile and only one is right. Mapping first takes the index from the unfiltered array, so dropping entry 3 of 6 yields ordinals `[0,1,2,4,5]` — a gap that no constraint rejects and nothing reports. `toFeatureRows`/`toProofPointRows` in [src/lib/projects/outcomes.ts](src/lib/projects/outcomes.ts) are extracted as pure functions precisely so this is unit-testable. The filter also has to exist at all: one model-emitted empty string hits a non-blank CHECK as 23514 and fails the **entire batch insert**.
+
+**The outcome extraction sits in its OWN try/catch inside `finalizeProject`, and that is not defensive padding.** Uncaught, an OpenAI 500 there escapes to §15.9's catch, which forces `ready` (fine) and returns `"error"` — and `maybeFinalize` **skips the completion email** on `"error"`. So a failure in a *secondary* extraction would silently suppress the "project is ready" mail for a project whose summary generated perfectly, and would report an error for writes that already committed.
+
+**The wipe happens AFTER the model call returns, inside that try.** Deleting first turns a transient 429 into permanent data loss. On failure nothing is deleted and the page keeps showing the last good set. The `usable.length === 0` early-return branch needs its own wipe, because it returns before the extraction block entirely.
+
+**`OUTCOMES_SYSTEM`'s no-client-name rule is BLANKET, unlike `CLIENT_ANONYMITY_RULE`.** There is no rule-6 conflict to resolve — nothing in that prompt mandates naming anybody, so there is no counter-instruction to produce the unpredictable *partial* redaction that conditional scoping exists to avoid. `extractOutcomes` therefore takes **no `mayUseClientName` parameter**, and a test pins that absence. **It is a mitigation, not a control:** the model receives `raw_text`, which genuinely contains those names, and `evidence_quote` is verbatim *by design*, so a leak is possible and nothing detects it. The rule-8 assertion in `tests/llm/outcomes.test.mts` is **knowingly flaky** and says so in its failure message — loosening it converts a known limitation into a hidden one. No UI copy may describe these lists as anonymised.
+
+**Document removal is `is_active = false`, and it needs NO RPC — verified, not assumed.** `soft_delete_project` must be an RPC because `projects_select` filters `deleted_at is null` and Postgres checks an UPDATE's NEW row against the SELECT policy. `documents_select` filters **only on the claim, not `is_active`** (contrast `chunks_select`, which does filter it), so the new row stays visible to its own writer and a plain `.update()` succeeds. `documents` also has no column-grant lockdown. **`setDocumentActive` flips `is_active` BEFORE `projects.status`** — `claim_finalize` counts `is_active and status in ('queued','processing')`, so deactivating a still-processing document removes it from the pending count; reversed, a concurrent worker finalizes on the stale corpus.
+
+**`dispatch([])` returns early and never calls `maybeFinalize`.** Both new paths have nothing to dispatch, so `setDocumentActive`'s deactivate branch and `regenerateProject` call `maybeFinalize(projectId)` **directly** — via `after(async () => { await maybeFinalize(...) })`, because the ternary form types as `Promise<void> | Promise<boolean>` and `after()` rejects it. Still through `claim_finalize`, never `finalizeProject` directly: §15.6 has exactly one gate.
+
+**`regenerateProject` writes `status='processing'` BEFORE `maybeFinalize`.** `claim_finalize` only flips `processing` → `finalizing`, so calling it against a `ready` project returns false and **nothing happens** — no summary, no error, no log. It also guards on `status === 'ready'` and on there being at least one usable document, or the action mails a completion notice about a summary it never regenerated.
+
+**Regeneration does NOT re-extract or re-transcribe.** It reads `raw_text` from documents already `done`, so it costs two LLM calls plus an embedding — never Deepgram. A document stuck at `failed` is the cron sweep's job; conflating them would make a cheap idempotent button sometimes cost a re-transcribe. **No cooldown column:** one on `projects` would need appending to 0013's grant list, and hiding the button until `ready` already rate-limits it to exactly one regeneration.
+
+**Tabs are `<Link>`s, never buttons** — same rule as pagination, so the active view stays bookmarkable and needs no client JS, and only the active panel renders. `?tab=summary` is never emitted; the bare URL is the summary's canonical form. `asDerivedTab` falls back rather than throwing.
+
+**Known limit, stated honestly:** `getProject` filters `is_active = true`, so a removed document vanishes from Sources and there is **no in-UI restore**. The action supports both directions and the audit log records which happened, so the data is recoverable — but "reversible" means reversible in principle, not by clicking.
+
 ## Constraints that bite silently
 
+- **A new `projects` column is un-updatable until it is added to `0013`'s `grant update (...)` list** — currently 14 columns. This is why 0017 uses child tables: they carry Supabase's default grant and need no `grant` statement at all. The failure is a runtime 42501, *not* a compile error — the generated `Update` type includes every column in the catalog regardless of privileges.
+- **The AI provenance badge is `tone-neutral`, never `tone-warn`.** Every row of both 0017 lists carries it on every project, so amber there would appear constantly as a routine label and stop meaning "something is wrong". Precedent: an unapproved tech tag is a neutral chip with a tooltip, not a coloured badge.
 - **§15.12 lives in `src/app/projects/[id]/summary-sections.tsx`** — the only component touching `summary.sections`. No `switch`, no `if`, no lookup keyed on `s.key`; array order unconditionally; a `.sort()` is a bug.
 - **Never `.sort()` in the search render path.** `queries.ts` returns RRF order; re-sorting destroys the ranking.
 - **Never render the search `score`** — an RRF sum in the 0.008–0.033 range. Any percentage or bar fabricates calibration.

@@ -12,12 +12,13 @@ import { NdaForm } from "./nda-form";
 import { getProject } from "@/lib/projects/queries";
 import { asSummary } from "@/lib/types";
 import { formatDate, formatDateRange } from "@/lib/format";
-import { SummarySections } from "./summary-sections";
 import { DocumentList } from "./document-list";
 import { AddFiles } from "./add-files";
 import { LiveStatus } from "./live-status";
 import { EditForm } from "./edit-form";
 import { DeleteProject } from "./delete-project";
+import { DerivedTabs, asDerivedTab } from "./derived-tabs";
+import { RegenerateProject } from "./regenerate-project";
 
 export const dynamic = "force-dynamic";
 
@@ -40,9 +41,21 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
   const data = await getProject(id);
   if (!data) notFound();
 
-  const { project, documents, tags, createdBy, updatedBy, links, client } =
-    data;
+  const {
+    project,
+    documents,
+    tags,
+    createdBy,
+    updatedBy,
+    links,
+    client,
+    features,
+    proofPoints,
+  } = data;
   const summary = asSummary(project.summary);
+  // Narrowed, never trusted: a stale or hand-edited ?tab= falls back to the
+  // summary rather than rendering nothing.
+  const tab = asDerivedTab((await props.searchParams).tab as string | undefined);
   const canUpdate = can(user, "projects:update");
   const canSetNda = can(user, "projects:set-nda");
   const d = disclosure(project.nda_status);
@@ -56,6 +69,16 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
       <PageHeader
         kicker="Portfolio"
         title={project.title}
+        // The one red run on this view, and PageHeader's single `action`
+        // slot is that ration expressed structurally. Gated on 'ready'
+        // because regenerateProject rejects anything else — an
+        // always-visible button would offer an action that can only fail.
+        // That gate is also the rate limit, hence no cooldown column.
+        action={
+          canUpdate && project.status === "ready" ? (
+            <RegenerateProject projectId={project.id} />
+          ) : null
+        }
         meta={
           <div className="flex flex-wrap items-center gap-[6px]">
             <StatusChip kind="project" status={project.status} />
@@ -93,15 +116,21 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
        */}
       <div className="grid gap-cell-x lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
         <div className="min-w-0 space-y-cell-x">
-          <Card>
-            <CardHeader
-              title="Summary"
-              description="Generated from the project description and every attached document."
-            />
-            <CardContent>
-              <SummarySections summary={summary} />
-            </CardContent>
-          </Card>
+          {/*
+            * The three derived views of one corpus, tabbed. Always mounted,
+            * including mid-regenerate: the previous rows are still in the
+            * tables (finalizeProject wipes them immediately before the
+            * reinsert), so hiding this would blank content that is still
+            * valid. `processing` only changes the empty-state copy.
+            */}
+          <DerivedTabs
+            projectId={project.id}
+            active={tab}
+            summary={summary}
+            features={features}
+            proofPoints={proofPoints}
+            processing={project.status !== "ready"}
+          />
 
           {canUpdate ? (
             <EditForm

@@ -5,8 +5,10 @@ import { zodResponseFormat } from "openai/helpers/zod";
 import { serverEnv } from "@/lib/env";
 import {
   MetadataSchema,
+  OutcomesSchema,
   SummarySchema,
   type ExtractedMetadata,
+  type ExtractedOutcomes,
   type GeneratedSummary,
 } from "./schemas";
 import type { Summary } from "@/lib/types";
@@ -266,4 +268,105 @@ export function renderSummary(summary: Summary): string {
     .filter((s) => s.content?.trim())
     .map((s) => `${s.label}\n${s.content.trim()}`)
     .join("\n\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Features delivered and proof points (migration 0017)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── ONE CALL, NOT TWO ─────────────────────────────────────────────────────
+ * The corpus is the dominant token cost in this system — finalizeProject
+ * concatenates every active document's full raw_text, and there is no
+ * truncation anywhere on the chat path. Two calls re-send that whole payload
+ * twice, on every finalize AND every manual regenerate, to separate two tasks
+ * that share a system prompt anyway ("pull concrete deliverables out of this
+ * corpus; do not invent").
+ *
+ * The cost is failure isolation: a schema failure loses both lists. That is
+ * ACCEPTED because the caller degrades gracefully — a failure skips the wipe
+ * entirely and the previously-extracted rows survive. One call therefore
+ * makes the wipe-and-rebuild one all-or-nothing unit, where two independent
+ * calls with independent failures would produce the partial state (features
+ * rebuilt, proof points stale) that is genuinely hard to reason about.
+ *
+ * ── RULE 8 IS BLANKET, AND THAT IS THE DECISION ───────────────────────────
+ * Unlike CLIENT_ANONYMITY_RULE, this rule is UNCONDITIONAL rather than gated
+ * on disclosure(). There is no rule-6 conflict to resolve here: nothing in
+ * this prompt mandates naming anybody, so there is no counter-instruction to
+ * produce the unpredictable PARTIAL redaction that conditional scoping exists
+ * to avoid. Blanket is both simpler and stricter, and it costs nothing.
+ *
+ * Consequently extractOutcomes takes NO mayUseClientName parameter. That
+ * absence is deliberate and tests/outcomes.test.mts pins it — adding one
+ * would reintroduce exactly the contradiction the summariser has to manage.
+ *
+ * ── ⚠ IT IS STILL A MITIGATION, NOT A CONTROL ─────────────────────────────
+ *   The model receives raw_text, which genuinely contains client names, and
+ *   evidence_quote is verbatim BY DESIGN — so a leak is possible and nothing
+ *   detects it. Migration 0017 states this on the schema itself. Never
+ *   describe this rule as a guarantee, in UI copy or anywhere else.
+ */
+export const OUTCOMES_SYSTEM = `You extract two lists from the material for a software project: the features it delivered, and the proof points that evidence its results.
+
+RULES
+1. "features" lists what was actually BUILT and SHIPPED. Each entry has a
+   short noun-phrase "name" ("Real-time load assignment") and a "description"
+   of one or two sentences of plain prose.
+2. Never list a feature the material does not state was delivered. A plan, a
+   proposal, a backlog item or a "next phase" is not a delivered feature.
+   Omit it.
+3. Do not list infrastructure or generic capability as a feature —
+   "PostgreSQL database", "REST API", "cloud hosting", "responsive design".
+   A feature is something a user of the system can do.
+4. "proof_points" lists QUANTIFIED outcomes. Each needs a "claim" stating the
+   outcome, and an "evidence_quote" reproduced VERBATIM from the material:
+   copy the supporting sentence exactly, character for character. Never
+   paraphrase, summarise or reconstruct a quote.
+5. Set "metric" to the isolated figure when the claim has one ("11 minutes to
+   under 2 minutes", "310 drivers", "40%"). Set it to null when the outcome is
+   real but not numeric. NEVER invent a number to fill this field.
+6. Set "source_filename" to the filename EXACTLY as it appears in the
+   "--- filename ---" header of the block the quote came from. Use null if you
+   cannot identify the block.
+7. Return an empty array rather than a weak entry. Three real proof points are
+   worth more than eight where five are inferred. If the material supports
+   none, return [].
+8. NEVER name a client, customer, company or brand — not in a feature name, a
+   description, a claim, a metric, or an evidence quote. This applies even
+   when the material names them repeatedly, and even INSIDE a verbatim quote:
+   replace the name in the quote with the role or a generic noun ("the
+   client", "the operator", "the depot") and change NOTHING else about the
+   quoted wording. Attribute speakers by ROLE ("the client's Operations
+   Director"), never by personal name.
+9. Plain prose. No markdown, no bullet characters, no headings.
+10. Order both lists most significant first.`;
+
+export async function extractOutcomes(input: {
+  corpus: string;
+  title: string;
+}): Promise<ExtractedOutcomes> {
+  const openai = client();
+
+  const completion = await openai.chat.completions.parse({
+    model: CHAT_MODEL,
+    // No `temperature` — see extractMetadata. The gpt-5 family 400s on it.
+    messages: [
+      { role: "system", content: OUTCOMES_SYSTEM },
+      {
+        role: "user",
+        content: [
+          `Project title: ${input.title}`,
+          "",
+          "--- PROJECT MATERIAL ---",
+          input.corpus,
+        ].join("\n"),
+      },
+    ],
+    response_format: zodResponseFormat(OutcomesSchema, "outcomes"),
+  });
+
+  const parsed = completion.choices[0]?.message.parsed;
+  if (!parsed) throw new Error("Outcome extraction returned no parsed output");
+  return parsed;
 }

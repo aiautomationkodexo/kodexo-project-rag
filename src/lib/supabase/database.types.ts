@@ -275,6 +275,41 @@ export type Database = {
           },
         ]
       }
+      project_features: {
+        Row: {
+          created_at: string
+          description: string
+          id: string
+          name: string
+          ordinal: number
+          project_id: string
+        }
+        Insert: {
+          created_at?: string
+          description: string
+          id?: string
+          name: string
+          ordinal: number
+          project_id: string
+        }
+        Update: {
+          created_at?: string
+          description?: string
+          id?: string
+          name?: string
+          ordinal?: number
+          project_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "project_features_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       project_links: {
         Row: {
           created_at: string
@@ -306,6 +341,54 @@ export type Database = {
             columns: ["project_id"]
             isOneToOne: false
             referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      project_proof_points: {
+        Row: {
+          claim: string
+          created_at: string
+          evidence_quote: string
+          id: string
+          metric: string | null
+          ordinal: number
+          project_id: string
+          source_document_id: string | null
+        }
+        Insert: {
+          claim: string
+          created_at?: string
+          evidence_quote: string
+          id?: string
+          metric?: string | null
+          ordinal: number
+          project_id: string
+          source_document_id?: string | null
+        }
+        Update: {
+          claim?: string
+          created_at?: string
+          evidence_quote?: string
+          id?: string
+          metric?: string | null
+          ordinal?: number
+          project_id?: string
+          source_document_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "project_proof_points_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "project_proof_points_source_document_id_fkey"
+            columns: ["source_document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
             referencedColumns: ["id"]
           },
         ]

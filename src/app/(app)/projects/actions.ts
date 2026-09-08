@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCurrentUser, assertClaim } from "@/lib/auth/claims";
 import { dispatch } from "@/lib/pipeline/dispatch";
+import { maybeFinalize } from "@/lib/pipeline/finalize-project";
 import { contentHash } from "@/lib/pipeline/process-document";
 import { MIN_CHUNK } from "@/lib/pipeline/chunk";
 import {
@@ -668,6 +669,277 @@ export async function setDocumentVisibility(
   });
 
   after(() => dispatch([documentId], projectId));
+  revalidatePath(`/projects/${projectId}`);
+  return {};
+}
+
+/**
+ * Deactivates or reactivates one document - the "Remove document" control.
+ *
+ * `is_active = false`, and the three removal-shaped states are genuinely
+ * different:
+ *   no_index   : still LISTED on the project, excluded from retrieval and
+ *                from the summariser corpus. "Hidden from search."
+ *   is_active  : gone from the project as far as every query is concerned,
+ *                but raw_text survives. "Removed."
+ *   delete     : gone, raw_text destroyed, no way back.
+ * This is the middle one, and it is reversible precisely because §15.2
+ * preserves raw_text - the re-chunk needs no Storage read and no
+ * re-transcribe.
+ *
+ * -- NO RPC, AND THAT WAS VERIFIED RATHER THAN ASSUMED --------------------
+ * deleteProject MUST go through soft_delete_project because projects_select
+ * filters `deleted_at is null` and Postgres checks an UPDATE's NEW row
+ * against the SELECT policy - so writing deleted_at makes the row invisible
+ * to its own writer and the write is rejected.
+ *
+ * documents_select (0002) filters ONLY on the claim, NOT on is_active -
+ * contrast chunks_select, which does filter it. So the NEW row stays visible
+ * and a plain UPDATE succeeds. `documents` also has no column-grant lockdown
+ * (0007/0011/0013 covered profiles, tech_tags and projects only), so
+ * documents_update's projects:update check is the whole authorization story.
+ * Do not "fix" this into an RPC.
+ *
+ * -- KNOWN LIMIT ---------------------------------------------------------
+ * getProject filters is_active = true, so a removed document vanishes from
+ * the Sources list and there is currently NO in-UI restore. This action
+ * supports both directions and the audit log records which happened, so the
+ * data is recoverable - but "reversible" here means reversible in principle,
+ * not by clicking. A restore affordance is a further query plus a collapsed
+ * "Removed" list; deliberately out of scope for now.
+ */
+export async function setDocumentActive(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "Your session has expired. Sign in again." };
+
+  try {
+    assertClaim(user, "projects:update");
+  } catch {
+    return { error: "You do not have permission to edit this project." };
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const documentId = String(formData.get("documentId") ?? "");
+  const active = String(formData.get("active") ?? "");
+  if (!projectId || !documentId) return { error: "Missing document id." };
+  if (active !== "true" && active !== "false") {
+    return { error: "Unknown state." };
+  }
+  const isActive = active === "true";
+
+  const supabase = await createClient();
+
+  // 1. The is_active write. documents_update is the authorization check.
+  //
+  //    On the way back IN, re-arm the pipeline in the SAME statement: a
+  //    reactivated document has no chunks (they were deleted on the way out)
+  //    and must be claimable by claim_document again.
+  const { error: activeError } = await supabase
+    .from("documents")
+    .update({
+      is_active: isActive,
+      ...(isActive
+        ? { status: "queued" as const, attempts: 0, error: null }
+        : {}),
+    })
+    .eq("id", documentId)
+    .eq("project_id", projectId);
+
+  if (activeError) return { error: activeError.message };
+
+  // 2. Chunks, on the way OUT only. Service-role: chunks are "written
+  //    exclusively by the pipeline via the service role" (0002) and there is
+  //    no chunks policy that would permit this through the user's client.
+  //    Deleting is what stops search citing a source the project no longer
+  //    has. On the way IN, processDocument deletes them itself as its own
+  //    idempotency step, so doing it here would be redundant.
+  if (!isActive) {
+    const admin = createAdminClient();
+    const { error: delError } = await admin
+      .from("chunks")
+      .delete()
+      .eq("document_id", documentId);
+    if (delError) return { error: delError.message };
+  }
+
+  // 3. Re-arm finalization. claim_finalize only ever acts on 'processing', so
+  //    without this the re-summary never happens and the project keeps a
+  //    summary describing a document it no longer has.
+  //
+  //    THE ORDER MATTERS: this comes AFTER the is_active write, not before.
+  //    claim_finalize counts `is_active and status in ('queued','processing')`
+  //    as pending, so deactivating a still-processing document REMOVES it
+  //    from that count and can unblock a finalize. Flipping the project first
+  //    would let a concurrent worker win claim_finalize and summarise the
+  //    stale corpus.
+  const { error: projError } = await supabase
+    .from("projects")
+    .update({ status: "processing", last_updated_by: user.id })
+    .eq("id", projectId);
+  if (projError) return { error: projError.message };
+
+  await writeAudit({
+    actorId: user.id,
+    action: isActive ? "document.reactivate" : "document.deactivate",
+    entityType: "document",
+    entityId: documentId,
+    meta: { project_id: projectId },
+  });
+
+  // 4. Dispatch.
+  //
+  //    THE TWO BRANCHES CANNOT SHARE ONE CALL. dispatch([]) returns EARLY on
+  //    an empty array and never reaches maybeFinalize, so the deactivate
+  //    branch - which has no document to process - must call maybeFinalize
+  //    directly or the project strands in 'processing' forever with no
+  //    re-summary and nothing raised anywhere. `dispatch([], projectId)` here
+  //    would be a silent no-op.
+  //
+  //    An async block rather than a ternary expression: maybeFinalize returns
+  //    boolean and dispatch returns void, so the ternary's type is
+  //    Promise<void> | Promise<boolean>, which after() rejects. Awaiting and
+  //    discarding is the honest fix — the return value is genuinely unused
+  //    here, since claim_finalize losing is a normal outcome, not an error.
+  after(async () => {
+    if (isActive) {
+      await dispatch([documentId], projectId);
+    } else {
+      await maybeFinalize(projectId);
+    }
+  });
+  revalidatePath(`/projects/${projectId}`);
+  return {};
+}
+
+/**
+ * Manual "Regenerate" - re-runs the summariser, the metadata extraction and
+ * the outcome extraction over the documents already processed.
+ *
+ * -- WHAT IT DOES NOT DO -------------------------------------------------
+ * It does NOT re-extract, re-parse or re-transcribe anything. No document is
+ * re-queued and no Storage object is read. finalizeProject reads raw_text
+ * from documents already at status='done', so a regenerate costs one
+ * summariser call, one outcome call and one embedding - never a Deepgram
+ * transcription, which is the slow, expensive, chargeable one.
+ *
+ * A document stuck at 'failed' is therefore NOT rescued by this button. That
+ * is the cron sweep's job (stuck_documents), and conflating the two would
+ * make a cheap idempotent action sometimes cost a re-transcribe.
+ *
+ * The summary stays ADDITIVE: finalizeProject passes the existing summary to
+ * generateSummary, prompt rule 1 reuses the section keys exactly, and §15.12
+ * is untouched. Features and proof points are the exception and are wiped and
+ * rebuilt - safe only because neither table holds human-authored rows (0017).
+ *
+ * -- ORDERING ------------------------------------------------------------
+ * guard -> status='processing' -> after(maybeFinalize) -> revalidatePath.
+ *
+ * The status write MUST precede maybeFinalize. claim_finalize only flips
+ * 'processing' -> 'finalizing', so calling it against a 'ready' project
+ * returns false and NOTHING HAPPENS - no summary, no error, no log.
+ *
+ * maybeFinalize is called DIRECTLY, never through dispatch. dispatch([])
+ * returns early on an empty array and never calls maybeFinalize; there is no
+ * document to dispatch here, which is the entire point of this action.
+ *
+ * §15.6 is preserved: this goes through claim_finalize like every other
+ * finalization path. It does NOT call finalizeProject directly, which would
+ * be the first application-level bypass of the one gate in this codebase.
+ *
+ * -- NO COOLDOWN COLUMN --------------------------------------------------
+ * A `last_regenerated_at` on `projects` would have to be appended to 0013's
+ * 14-column grant list or it is un-updatable by `authenticated` (42501 on
+ * save) - a standing maintenance cost for a rate limit the status machine
+ * already provides: the button is not offered again until the project is back
+ * to 'ready', which is exactly one regeneration long.
+ *
+ * -- KNOWN LIMIT ---------------------------------------------------------
+ * after() runs within the budget of ITS OWN ROUTE - this page's Server
+ * Action, not the 800s /api/process declares (see dispatch.ts). Two LLM calls
+ * plus an embedding is the same work updateProject's dispatch already
+ * triggers, so this is fine today. If a very large corpus starts timing out,
+ * the fix is to POST /api/finalize/{id} with the x-internal header - that
+ * route exists at maxDuration = 800 - reading internalBaseUrl and
+ * internalSecret OUTSIDE the try. Not a longer after().
+ */
+export async function regenerateProject(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "Your session has expired. Sign in again." };
+
+  try {
+    assertClaim(user, "projects:update");
+  } catch {
+    return { error: "You do not have permission to edit this project." };
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  if (!projectId) return { error: "Missing project id." };
+
+  const supabase = await createClient();
+
+  // The user's client, so projects_select re-proves visibility for free and
+  // a soft-deleted project cannot be regenerated.
+  const { data: project } = await supabase
+    .from("projects")
+    .select("id, status")
+    .eq("id", projectId)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (!project) return { error: "Project not found." };
+
+  // Regenerating a project that is not 'ready' is incoherent: 'processing' or
+  // 'finalizing' means a summary is already being produced from a corpus that
+  // is still settling, and flipping the status underneath that races the
+  // worker. claim_finalize would serialize it safely either way, but the user
+  // deserves a readable message rather than a silent no-op.
+  if (project.status !== "ready") {
+    return {
+      error: "This project is still processing. Try again once it is ready.",
+    };
+  }
+
+  // Without this, maybeFinalize runs, finds nothing usable, returns "empty",
+  // and mails a completion notice about a summary that was never regenerated
+  // - having flipped the project through 'processing' for no reason.
+  const { count: usable } = await supabase
+    .from("documents")
+    .select("id", { count: "exact", head: true })
+    .eq("project_id", projectId)
+    .eq("status", "done")
+    .eq("is_active", true)
+    .neq("visibility", "no_index");
+
+  if ((usable ?? 0) === 0) {
+    return { error: "There are no processed documents to summarise." };
+  }
+
+  const { error: statusError } = await supabase
+    .from("projects")
+    .update({ status: "processing", last_updated_by: user.id })
+    .eq("id", projectId);
+  if (statusError) return { error: statusError.message };
+
+  await writeAudit({
+    actorId: user.id,
+    action: "project.regenerate",
+    entityType: "project",
+    entityId: projectId,
+    meta: { documents: usable ?? 0 },
+  });
+
+  // Awaited inside the block, return value discarded: maybeFinalize returns
+  // boolean and after() wants void. claim_finalize losing is a normal
+  // outcome here, not an error worth surfacing.
+  after(async () => {
+    await maybeFinalize(projectId);
+  });
   revalidatePath(`/projects/${projectId}`);
   return {};
 }

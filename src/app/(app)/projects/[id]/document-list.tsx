@@ -2,6 +2,7 @@ import { StatusChip } from "@/components/ui/status-chip";
 import { Chip } from "@/components/ui/chip";
 import type { DocumentRow } from "@/lib/types";
 import { VisibilityToggle } from "./visibility-toggle";
+import { RemoveDocument } from "./remove-document";
 
 function isMedia(mime: string): boolean {
   return mime.startsWith("audio/") || mime.startsWith("video/");
@@ -104,12 +105,25 @@ export function DocumentList({
             {/* The synthetic description document is excluded: it IS the
                 project description, so removing it from the index while the
                 description still renders on the page would be incoherent. */}
+            {/* Two DIFFERENT operations, deliberately side by side:
+                  "Remove from index" keeps the document ON the project and
+                  only drops it from search; "Remove document" takes it off
+                  the project entirely (is_active = false, reversible because
+                  §15.2 keeps raw_text). The labels and titles carry that
+                  distinction — see remove-document.tsx.
+
+                  The wrapper owns the top margin. It used to live on
+                  VisibilityToggle's own <form>, which would now indent one
+                  control and not the other. */}
             {canUpdate && projectId && !doc.is_synthetic ? (
-              <VisibilityToggle
-                projectId={projectId}
-                documentId={doc.id}
-                visibility={doc.visibility}
-              />
+              <div className="mt-[6px] flex flex-wrap items-center gap-cell-x">
+                <VisibilityToggle
+                  projectId={projectId}
+                  documentId={doc.id}
+                  visibility={doc.visibility}
+                />
+                <RemoveDocument projectId={projectId} documentId={doc.id} />
+              </div>
             ) : null}
           </li>
         );

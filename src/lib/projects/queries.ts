@@ -11,6 +11,8 @@ import {
   type ProjectListItem,
   type ProjectSearchResult,
   type SearchHit,
+  type FeatureRow,
+  type ProofPointRow,
 } from "@/lib/types";
 
 /**
@@ -267,6 +269,8 @@ export async function getProject(id: string) {
     { data: people },
     { data: links },
     { data: client },
+    { data: features },
+    { data: proofPointRows },
   ] = await Promise.all([
       supabase
         .from("documents")
@@ -309,6 +313,33 @@ export async function getProject(id: string) {
         .select("client_name, updated_at")
         .eq("project_id", id)
         .maybeSingle(),
+      /*
+       * Features delivered (0017).
+       *
+       * ORDER BY ordinal, NOT created_at. A wipe-and-rebuild inserts every
+       * row in ONE statement, so now() is identical across all of them and
+       * ordering by it is genuinely non-deterministic. `ordinal` carries the
+       * model's most-significant-first judgement and nothing else does.
+       */
+      supabase
+        .from("project_features")
+        .select("id, name, description, ordinal")
+        .eq("project_id", id)
+        .order("ordinal", { ascending: true }),
+      /*
+       * Proof points (0017). Same ordering rule.
+       *
+       * The embedded documents(...) is a LEFT join and MUST be treated as
+       * one: source_document_id is nullable and ON DELETE SET NULL, so it
+       * legitimately resolves to nothing. Flattened to source_label below.
+       */
+      supabase
+        .from("project_proof_points")
+        .select(
+          "id, claim, metric, evidence_quote, ordinal, documents(filename, is_synthetic)",
+        )
+        .eq("project_id", id)
+        .order("ordinal", { ascending: true }),
     ]);
 
   const byId = new Map((people ?? []).map((p) => [p.id, p]));
@@ -327,5 +358,33 @@ export async function getProject(id: string) {
     links: links ?? [],
     /** Null when the reader lacks projects:view-client-info, or none is set. */
     client: client ?? null,
+    /** Ordered by `ordinal`. Array order IS display order; never re-sort. */
+    features: (features ?? []) as FeatureRow[],
+    proofPoints: (proofPointRows ?? []).map((p): ProofPointRow => {
+      const doc = p.documents as unknown as
+        | { filename: string; is_synthetic: boolean }
+        | null;
+      return {
+        id: p.id,
+        claim: p.claim,
+        metric: p.metric,
+        evidence_quote: p.evidence_quote,
+        ordinal: p.ordinal,
+        /*
+         * Null is a legal, expected value — the source may have been
+         * hard-deleted (ON DELETE SET NULL) or the model may have named a
+         * file that matched nothing. Consumers render NO attribution rather
+         * than a placeholder that implies a source.
+         *
+         * "Project description" matches what DocumentList shows for the
+         * synthetic row, so the two surfaces agree on what to call it.
+         */
+        source_label: doc
+          ? doc.is_synthetic
+            ? "Project description"
+            : doc.filename
+          : null,
+      };
+    }),
   };
 }

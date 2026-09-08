@@ -28,7 +28,7 @@ export function VisibilityToggle({
   const next = visibility === "no_index" ? "indexed" : "no_index";
 
   return (
-    <form action={formAction} className="mt-[6px]">
+    <form action={formAction}>
       <input type="hidden" name="projectId" value={projectId} />
       <input type="hidden" name="documentId" value={documentId} />
       <input type="hidden" name="visibility" value={next} />

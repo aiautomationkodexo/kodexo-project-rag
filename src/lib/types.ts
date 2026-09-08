@@ -119,3 +119,48 @@ export function asDocumentVisibility(value: string): DocumentVisibility {
 }
 
 export type Tone = "neutral" | "invert" | "ok" | "warn" | "err" | "info";
+
+/**
+ * Features delivered (migration 0017).
+ *
+ * ARRAY ORDER IS DISPLAY ORDER — getProject sorts by `ordinal`. A .sort() in
+ * any consumer is a bug, for the same reason it is one in summary-sections:
+ * the order is the model's judgement of significance and is recoverable from
+ * nothing else.
+ *
+ * No narrowing helper, unlike ProjectStatus / DocumentVisibility above: these
+ * columns are not CHECK-constrained vocabularies, they are free text and an
+ * int. An asFeatureRow() would be ceremony that validates nothing.
+ */
+export type FeatureRow = {
+  id: string;
+  name: string;
+  description: string;
+  ordinal: number;
+};
+
+/**
+ * Proof points (migration 0017).
+ *
+ * `metric` is null for a genuinely qualitative outcome — prompt rule 5 says
+ * null rather than invent a number, so null is the correct value and not
+ * missing data.
+ *
+ * `source_label` is pre-resolved in getProject from a LEFT join, and is
+ * legitimately null: source_document_id is ON DELETE SET NULL, and a
+ * model-reported filename can match nothing. Render NO attribution in that
+ * case — never a fallback that implies a source.
+ *
+ * ⚠ `evidence_quote` is VERBATIM corpus text. The extraction prompt asks the
+ *   model never to name a client, but that is a mitigation, not a control:
+ *   raw_text contains those names and nothing detects a leak. No UI copy may
+ *   describe these as anonymised. See migration 0017's header.
+ */
+export type ProofPointRow = {
+  id: string;
+  claim: string;
+  metric: string | null;
+  evidence_quote: string;
+  ordinal: number;
+  source_label: string | null;
+};
