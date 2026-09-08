@@ -62,6 +62,76 @@ export function asSummary(value: unknown): Summary | null {
   };
 }
 
+/**
+ * A stored case study outline section (migration 0018).
+ *
+ * `label` IS DENORMALISED INTO THE STORED JSON, deliberately — it is not read
+ * back from CASE_STUDY_SECTIONS at render time. A generated document is a
+ * record of what was produced, and if the house section list is later renamed
+ * or reordered, an outline generated last quarter must still render with the
+ * headings it was actually written against. Reading labels live would silently
+ * relabel existing documents.
+ *
+ * Contrast SummarySection, whose keys are model-generated and open-ended
+ * (§15.11): these keys come from OUR fixed list, so the stored copy is a
+ * snapshot rather than the authority.
+ */
+export type CaseStudyOutlineSection = {
+  key: string;
+  label: string;
+  /** Prose. Empty string is legal and means "the corpus supported nothing". */
+  content: string;
+};
+
+export type StoredCaseStudyOutline = {
+  /** One-line positioning, or null when the corpus did not support one. */
+  headline: string | null;
+  sections: CaseStudyOutlineSection[];
+};
+
+/**
+ * Narrows the untyped jsonb column without trusting its contents, exactly as
+ * asSummary does. Anything malformed is dropped rather than thrown on: a bad
+ * row must degrade to "no outline", never break the project page.
+ */
+export function asCaseStudyOutline(
+  value: unknown,
+): StoredCaseStudyOutline | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { headline?: unknown; sections?: unknown };
+  if (!Array.isArray(raw.sections)) return null;
+
+  const sections = raw.sections.flatMap((s): CaseStudyOutlineSection[] => {
+    if (!s || typeof s !== "object") return [];
+    const row = s as Record<string, unknown>;
+    if (typeof row.key !== "string" || typeof row.label !== "string") return [];
+    return [
+      {
+        key: row.key,
+        label: row.label,
+        content: typeof row.content === "string" ? row.content : "",
+      },
+    ];
+  });
+
+  if (sections.length === 0) return null;
+
+  return {
+    headline: typeof raw.headline === "string" ? raw.headline : null,
+    sections,
+  };
+}
+
+/** The row as the project page needs it. */
+export type CaseStudyRow = {
+  outline: StoredCaseStudyOutline;
+  /** Null means no downloadable object — render the outline regardless. */
+  storage_key: string | null;
+  filename: string;
+  size_bytes: number | null;
+  generated_at: string;
+};
+
 export type TechTag = {
   id: string;
   canonical_name: string;

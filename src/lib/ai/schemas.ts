@@ -67,3 +67,43 @@ export const OutcomesSchema = z.object({
 });
 
 export type ExtractedOutcomes = z.infer<typeof OutcomesSchema>;
+
+/**
+ * The case study outline (migration 0018).
+ *
+ * FIXED SECTIONS, unlike SummarySchema's open ones — and that contrast is the
+ * design, not an inconsistency. The summary is a knowledge base whose shape
+ * must follow whatever the corpus turns out to contain, which is why §15.11
+ * exists. A case study is a DELIVERABLE with a house structure: a reader
+ * expects the same headings in the same order every time. The model chooses
+ * the CONTENT, never the skeleton.
+ *
+ * That is also why `key` and `label` are not model-supplied here: the section
+ * list lives in CASE_STUDY_SECTIONS (src/lib/case-study/sections.ts) and the
+ * model returns content keyed to it. A model-invented key would produce a
+ * document whose headings drift between regenerations of the same project.
+ *
+ * Every field is required and `.nullable()` rather than `.optional()` —
+ * `strict: true` throws on an optional property.
+ */
+export const CaseStudyOutlineSchema = z.object({
+  /**
+   * A one-line positioning statement for the top of the document. Nullable
+   * because a thin corpus genuinely cannot support one, and an invented
+   * headline is the most quotable thing in the file.
+   */
+  headline: z.string().nullable(),
+  sections: z.array(
+    z.object({
+      /** Must be one of CASE_STUDY_SECTIONS' keys; unknown keys are dropped. */
+      key: z.string(),
+      /**
+       * What the corpus actually supports for this section, as prose. Empty
+       * string when the corpus says nothing — NOT a fabricated paragraph.
+       */
+      content: z.string(),
+    }),
+  ),
+});
+
+export type CaseStudyOutline = z.infer<typeof CaseStudyOutlineSchema>;

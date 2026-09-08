@@ -275,6 +275,44 @@ export type Database = {
           },
         ]
       }
+      project_case_study: {
+        Row: {
+          filename: string
+          generated_at: string
+          model: string | null
+          outline: Json
+          project_id: string
+          size_bytes: number | null
+          storage_key: string | null
+        }
+        Insert: {
+          filename: string
+          generated_at?: string
+          model?: string | null
+          outline: Json
+          project_id: string
+          size_bytes?: number | null
+          storage_key?: string | null
+        }
+        Update: {
+          filename?: string
+          generated_at?: string
+          model?: string | null
+          outline?: Json
+          project_id?: string
+          size_bytes?: number | null
+          storage_key?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "project_case_study_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: true
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       project_features: {
         Row: {
           created_at: string

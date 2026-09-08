@@ -5,12 +5,14 @@ import { embedQuery } from "@/lib/ai/openai";
 import { toVector } from "@/lib/supabase/vector";
 import type { Paged } from "@/lib/pagination";
 import {
+  asCaseStudyOutline,
   asDocumentStatus,
   asProjectStatus,
   type DocumentRow,
   type ProjectListItem,
   type ProjectSearchResult,
   type SearchHit,
+  type CaseStudyRow,
   type FeatureRow,
   type ProofPointRow,
 } from "@/lib/types";
@@ -271,6 +273,7 @@ export async function getProject(id: string) {
     { data: client },
     { data: features },
     { data: proofPointRows },
+    { data: caseStudyRow },
   ] = await Promise.all([
       supabase
         .from("documents")
@@ -340,6 +343,21 @@ export async function getProject(id: string) {
         )
         .eq("project_id", id)
         .order("ordinal", { ascending: true }),
+      /*
+       * The case study outline (0018). At most one row — project_id is the
+       * primary key — so maybeSingle() is exact rather than a truncation.
+       *
+       * `storage_key` IS selected but is never handed to the browser: the
+       * page renders a link to our own download route, which mints a signed
+       * URL server-side. Returning the raw key would be harmless (the bucket
+       * is private) but pointless, and it invites a future edit to build a
+       * public URL from it.
+       */
+      supabase
+        .from("project_case_study")
+        .select("outline, storage_key, filename, size_bytes, generated_at")
+        .eq("project_id", id)
+        .maybeSingle(),
     ]);
 
   const byId = new Map((people ?? []).map((p) => [p.id, p]));
@@ -386,5 +404,26 @@ export async function getProject(id: string) {
           : null,
       };
     }),
+    /*
+     * The case study outline (0018), or null when none has been generated.
+     *
+     * Narrowed through asCaseStudyOutline, which drops a malformed section
+     * rather than throwing: a bad jsonb row must degrade to "no outline", not
+     * break the project page. A row whose outline narrows to null is reported
+     * as no case study at all — there is nothing renderable and nothing to
+     * download that would make sense without it.
+     */
+    caseStudy: ((): CaseStudyRow | null => {
+      if (!caseStudyRow) return null;
+      const outline = asCaseStudyOutline(caseStudyRow.outline);
+      if (!outline) return null;
+      return {
+        outline,
+        storage_key: caseStudyRow.storage_key,
+        filename: caseStudyRow.filename,
+        size_bytes: caseStudyRow.size_bytes,
+        generated_at: caseStudyRow.generated_at,
+      };
+    })(),
   };
 }

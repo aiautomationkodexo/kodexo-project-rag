@@ -12,6 +12,10 @@ import {
 import { asSummary, type Summary } from "@/lib/types";
 import { disclosure } from "@/lib/projects/disclosure";
 import { toFeatureRows, toProofPointRows } from "@/lib/projects/outcomes";
+import {
+  generateCaseStudy,
+  discardCaseStudy,
+} from "@/lib/case-study/generate";
 import { toVectorOrNull } from "@/lib/supabase/vector";
 import {
   notifyProjectReady,
@@ -117,6 +121,17 @@ export async function finalizeProject(
         .from("project_proof_points")
         .delete()
         .eq("project_id", projectId);
+
+      // THE OUTLINE GOES TOO, and its Storage object with it (0018).
+      //
+      // Same argument as the two deletes above, with more force: this is a
+      // DOWNLOADABLE FILE. A project whose last document was removed would
+      // otherwise keep offering a case study describing a corpus that no
+      // longer exists — and unlike a stale table on a page, that file leaves
+      // the building. Deleting the row is not enough on its own; Storage does
+      // not cascade from Postgres, which is the premise the whole 0009 sweep
+      // rests on.
+      await discardCaseStudy(projectId);
 
       await admin
         .from("projects")
@@ -276,6 +291,38 @@ export async function finalizeProject(
     } catch (error) {
       // Logged, NEVER rethrown. See the note above.
       console.error(`[finalize:outcomes] ${projectId}:`, error);
+    }
+
+    // ── Case study outline — GENERATE, UPLOAD, REPLACE (0018) ────────────
+    //
+    // LAST, and in its OWN try/catch, for exactly the reasons the outcomes
+    // block above documents. Repeating the important half: an OpenAI 500 or a
+    // Storage failure here must NOT escape to §15.9's catch, because that
+    // returns "error" and maybeFinalize SKIPS THE COMPLETION EMAIL on
+    // "error". Without this catch, a failed DOCX upload would silently
+    // suppress the "your project is ready" mail for a project whose summary
+    // and outcomes both generated perfectly.
+    //
+    // ⚠ THE CORPUS PASSED HERE IS THE SAME ONE THE SUMMARISER SAW, and that
+    //   is not a convenience — it is the no_index and client-name enforcement
+    //   inherited whole. `usable` is already filtered to active, done,
+    //   non-no_index documents, and project_client was never joined. Building
+    //   a fresh corpus query for this call is how a future edit reintroduces
+    //   a no_index document into an externally-facing deliverable.
+    //
+    // The generated file is NEVER given a `documents` row. See 0018's header:
+    // that would feed this text back into the corpus it was generated from,
+    // and every regeneration would compound the distortion with nothing
+    // raised anywhere.
+    try {
+      await generateCaseStudy({
+        projectId,
+        title: project.title,
+        corpus,
+        ndaStatus: project.nda_status,
+      });
+    } catch (error) {
+      console.error(`[finalize:case-study] ${projectId}:`, error);
     }
 
     return "summarized";

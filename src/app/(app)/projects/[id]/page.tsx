@@ -19,6 +19,7 @@ import { EditForm } from "./edit-form";
 import { DeleteProject } from "./delete-project";
 import { DerivedTabs, asDerivedTab } from "./derived-tabs";
 import { RegenerateProject } from "./regenerate-project";
+import { CaseStudy } from "./case-study";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +52,7 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
     client,
     features,
     proofPoints,
+    caseStudy,
   } = data;
   const summary = asSummary(project.summary);
   // Narrowed, never trusted: a stale or hand-edited ?tab= falls back to the
@@ -129,6 +131,26 @@ export default async function ProjectPage(props: PageProps<"/projects/[id]">) {
             summary={summary}
             features={features}
             proofPoints={proofPoints}
+            processing={project.status !== "ready"}
+          />
+
+          {/*
+            * The case study outline (0018).
+            *
+            * BELOW the derived tabs and ABOVE the edit form: it is a
+            * deliverable produced FROM the summary's corpus, so it reads as a
+            * consequence of what sits above it rather than as a fourth tab.
+            * Deliberately NOT folded into DerivedTabs — the other three are
+            * views of the corpus, this one is a downloadable artifact, and a
+            * tab would hide a download behind a click.
+            *
+            * Rendered for every viewer, not just canUpdate: a BD reader with
+            * projects:view is the primary AUDIENCE for this file. Generating
+            * it needs projects:update; downloading it does not.
+            */}
+          <CaseStudy
+            projectId={project.id}
+            caseStudy={caseStudy}
             processing={project.status !== "ready"}
           />
 

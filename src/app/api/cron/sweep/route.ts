@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { BUCKET } from "@/lib/pipeline/extract";
+import { CASE_STUDY_KEY_PREFIX } from "@/lib/case-study/generate";
 import { serverEnv } from "@/lib/env";
 
 export const maxDuration = 800;
@@ -10,10 +11,18 @@ export const maxDuration = 800;
  * will (PRD §13). Scheduled every 5 minutes in vercel.json — a Pro-plan
  * feature; Hobby is limited to daily crons and would fail the deployment.
  *
- * Five steps, in order of urgency. Every one is bounded per tick and every one
+ * Six steps, in order of urgency. Every one is bounded per tick and every one
  * swallows its own failures: a sweep that throws halfway leaves the remaining
  * steps un-run until the next tick, and step 1 is the one that must never be
  * starved.
+ *
+ * Steps 4-6 are all storage reclamation, and they are three steps rather than
+ * one because each finds its garbage a different way: step 4 from
+ * `documents.storage_key` for soft-deleted projects, step 5 by walking
+ * `projects/` for objects with no row at all, and step 6 by walking
+ * `case-studies/` for outlines that a regeneration superseded. An outline has
+ * no `documents` row by design (0018), so steps 4 and 5 are structurally
+ * incapable of seeing one.
  */
 
 /** Objects per storage.remove() call. Keeps the request body sane. */
@@ -106,6 +115,7 @@ export async function GET(request: NextRequest) {
 
   const purged = await purgeDeletedProjects(admin);
   const abandoned = await removeAbandonedUploads(admin);
+  const staleOutlines = await removeSupersededCaseStudies(admin);
 
   return Response.json({
     ok: true,
@@ -114,6 +124,7 @@ export async function GET(request: NextRequest) {
     refinalized: unfinalized?.length ?? 0,
     purged,
     abandoned,
+    staleOutlines,
   });
 }
 
@@ -258,6 +269,128 @@ async function removeAbandonedUploads(
     return removed;
   } catch (error) {
     console.error("[sweep:abandoned]:", error);
+    return 0;
+  }
+}
+
+/**
+ * Step 6 — remove superseded case study outlines (0018).
+ *
+ * ── WHY THIS EXISTS AT ALL ────────────────────────────────────────────────
+ * The requirement is that regenerating an outline deletes the previous file
+ * PERMANENTLY. generateCaseStudy does delete it inline, but that delete is
+ * deliberately non-fatal — the row already points at the new object, so
+ * failing the finalize over a storage cleanup would trade a real product
+ * outcome for a billing detail. This step is what turns that best-effort
+ * delete into a convergent guarantee, and it covers three cases the inline
+ * delete cannot:
+ *
+ *   • the inline remove() failed (Storage 5xx, throttling);
+ *   • the invocation died between upload and the row update, leaving an
+ *     object nothing references;
+ *   • the project was soft-deleted — purgeDeletedProjects (step 4) walks
+ *     `documents.storage_key` and CANNOT see these objects, because an
+ *     outline deliberately has no `documents` row.
+ *
+ * ── DRIVEN FROM STORAGE, DIFFED AGAINST THE ROWS ──────────────────────────
+ * An unreferenced object is, by definition, invisible to every Postgres
+ * query — the same reason removeAbandonedUploads is driven from Storage.
+ *
+ * ── NO AGE GUARD IS NEEDED HERE, AND THAT IS A REAL DIFFERENCE ────────────
+ * removeAbandonedUploads needs its 30-minute guard because /api/upload-url
+ * mints a key BEFORE the documents row exists, so every in-flight browser
+ * upload legitimately looks abandoned. Nothing analogous happens here: the
+ * server uploads the bytes and writes the row within one function, and the
+ * row is written only AFTER the upload returns. So "not the current
+ * storage_key" is unambiguous rather than a race — with one exception, which
+ * the per-project ordering below handles: the row is read AFTER listing that
+ * project's objects, so an outline generated during the walk is already in
+ * the row by the time we diff and is never deleted.
+ */
+async function removeSupersededCaseStudies(
+  admin: ReturnType<typeof createAdminClient>,
+): Promise<number> {
+  try {
+    // Storage's list() gives no recursive walk, so enumerate the project
+    // prefixes under `case-studies/` and descend. Bounded per tick, like
+    // every other step; the next tick continues where this one stopped
+    // caring, because the work is idempotent.
+    const { data: projectPrefixes, error } = await admin.storage
+      .from(BUCKET)
+      .list(CASE_STUDY_KEY_PREFIX, { limit: 200 });
+
+    if (error || !projectPrefixes?.length) return 0;
+
+    let removed = 0;
+
+    for (const projectEntry of projectPrefixes) {
+      // Storage reports a prefix as an entry with a null id; a real file at
+      // this level would be a bug, and skipping it is safer than deleting it.
+      if (projectEntry.id !== null) continue;
+
+      const projectPrefix = `${CASE_STUDY_KEY_PREFIX}/${projectEntry.name}`;
+
+      const { data: generations } = await admin.storage
+        .from(BUCKET)
+        .list(projectPrefix, { limit: 100 });
+
+      if (!generations?.length) continue;
+
+      /*
+       * The row is read AFTER the listing, deliberately — see the header. A
+       * generation that lands mid-walk is then already reflected here, so it
+       * cannot be mistaken for a superseded one.
+       *
+       * A project with NO row (hard-deleted, or an outline discarded by
+       * finalizeProject's empty branch) yields a null key, so every object
+       * under its prefix is superseded. That is the intended reading, and it
+       * is what reclaims a soft-deleted project's outline.
+       */
+      const { data: row } = await admin
+        .from("project_case_study")
+        .select("storage_key")
+        .eq("project_id", projectEntry.name)
+        .maybeSingle();
+
+      const liveKey = row?.storage_key ?? null;
+
+      for (const generation of generations) {
+        if (generation.id !== null) continue;
+
+        const generationPrefix = `${projectPrefix}/${generation.name}`;
+
+        // The live key is `case-studies/{project}/{uuid}/{filename}`, so the
+        // generation directory is live iff the live key sits inside it.
+        // Compared with a trailing slash so `…/abc` cannot prefix-match
+        // `…/abcdef`.
+        if (liveKey && liveKey.startsWith(`${generationPrefix}/`)) continue;
+
+        const { data: files } = await admin.storage
+          .from(BUCKET)
+          .list(generationPrefix, { limit: 100 });
+
+        if (!files?.length) continue;
+
+        const keys = files.map((f) => `${generationPrefix}/${f.name}`);
+        const { error: removeError } = await admin.storage
+          .from(BUCKET)
+          .remove(keys);
+
+        if (removeError) {
+          console.error(
+            `[sweep:case-study] ${generationPrefix}:`,
+            removeError.message,
+          );
+          continue;
+        }
+
+        removed += keys.length;
+      }
+    }
+
+    return removed;
+  } catch (error) {
+    console.error("[sweep:case-study]:", error);
     return 0;
   }
 }

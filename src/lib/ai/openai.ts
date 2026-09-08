@@ -4,9 +4,11 @@ import OpenAI from "openai";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { serverEnv } from "@/lib/env";
 import {
+  CaseStudyOutlineSchema,
   MetadataSchema,
   OutcomesSchema,
   SummarySchema,
+  type CaseStudyOutline,
   type ExtractedMetadata,
   type ExtractedOutcomes,
   type GeneratedSummary,
@@ -368,5 +370,125 @@ export async function extractOutcomes(input: {
 
   const parsed = completion.choices[0]?.message.parsed;
   if (!parsed) throw new Error("Outcome extraction returned no parsed output");
+  return parsed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Case study outline (migration 0018)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── NEVER INVENT, EVEN THOUGH THAT LEAVES SECTIONS THIN ───────────────────
+ * Rule 2 is load-bearing. A model allowed to write plausible filler produces
+ * a document that LOOKS finished when the underlying material does not
+ * support it, and a fabrication here has a direct path into a client-facing
+ * case study. Leaving a section's content empty is the correct output when
+ * the corpus says nothing — not a failure to work around.
+ *
+ * ── EXTERNALLY FACING, SO disclosure() IS NOT OPTIONAL ────────────────────
+ * This is the most outward-bound artifact the system produces — a file a
+ * human downloads and pastes into a client-facing document. It therefore
+ * takes mayUseClientName and follows the CLIENT_ANONYMITY_RULE pattern
+ * exactly, including its resolution of the verbatim-quote conflict: the
+ * testimonial section mandates verbatim quotes, so a blanket ban would
+ * contradict it and produce unpredictable partial redaction. Scoped and
+ * explicit, like the summariser.
+ *
+ * ⚠ STILL A MITIGATION, NOT A CONTROL. The model receives raw_text, which
+ *   genuinely contains client names. The structural guarantee remains that
+ *   project_client is never read on this path.
+ */
+const CASE_STUDY_SYSTEM = `You draft the OUTLINE of a case study for a software project, for an internal writer who will finish it.
+
+You are given the project material and a fixed list of sections. Return content for those sections and nothing else.
+
+RULES
+1. Use ONLY the section keys supplied. Never invent, rename, merge or reorder
+   them. Return every key you were given, even when its content is empty.
+2. NEVER INVENT ANYTHING. No plausible-sounding figures, no imagined quotes,
+   no inferred client motivations, no "likely" outcomes. If the material does
+   not state it, it does not go in "content". A confident fabrication in this
+   document ends up in a client-facing case study.
+3. "content" is plain prose, 2-5 sentences, in the voice of a finished case
+   study. No markdown, no bullet characters, no headings, no meta-commentary
+   about the material or about what you were asked to do.
+4. Leave "content" as an empty string when the material supports nothing for
+   that section. An empty section is a correct answer; filler is not.
+5. Reproduce client quotes and testimonials VERBATIM, in quotation marks.
+   Never paraphrase a quote. If there are none in the material, leave the
+   testimonial content empty.
+6. "headline" is one line positioning the project — the sentence a reader sees
+   first. Null if the material does not support one; never a slogan you made
+   up.
+7. Quantified results must carry their figures exactly as the material states
+   them. Never round, scale, restate or combine numbers.`;
+
+/**
+ * Appended when disclosure() forbids naming the client.
+ *
+ * Reuses CLIENT_ANONYMITY_RULE's exact resolution rather than restating it:
+ * quote bodies stay verbatim, attribution moves to role. Numbered to follow
+ * this prompt's own rules, and it names rule 5 (this prompt's verbatim rule)
+ * rather than the summariser's rule 6.
+ */
+const CASE_STUDY_ANONYMITY_RULE = `
+8. Do NOT name the client organisation, and do not include client contact
+   names, anywhere in this document — not in the headline or the content.
+   Refer to them as "the client", and identify them by sector and scale
+   instead ("a national logistics operator").
+   Rule 5 still applies to quote BODIES — reproduce them verbatim, even where
+   the quoted text names the organisation itself. Change only the attribution:
+   give the speaker's role ("the client's Head of Operations"), never a
+   personal name.`;
+
+export async function generateCaseStudyOutline(input: {
+  title: string;
+  corpus: string;
+  /** Ordered {key, label, brief} — the skeleton. Content only, never shape. */
+  sections: readonly { key: string; label: string; brief: string }[];
+  /**
+   * False when the project's NDA terms forbid naming the client. Defaults to
+   * FALSE — fail closed, exactly as generateSummary does, so a caller that
+   * forgets it gets the anonymised prompt rather than the leaky one.
+   */
+  mayUseClientName?: boolean;
+}): Promise<CaseStudyOutline> {
+  const openai = client();
+  const systemPrompt = input.mayUseClientName
+    ? CASE_STUDY_SYSTEM
+    : CASE_STUDY_SYSTEM + CASE_STUDY_ANONYMITY_RULE;
+
+  const brief = input.sections
+    .map((s) => `- ${s.key} (${s.label}): ${s.brief}`)
+    .join("\n");
+
+  const completion = await openai.chat.completions.parse({
+    model: CHAT_MODEL,
+    // No `temperature` — see extractMetadata. The gpt-5 family 400s on it.
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          `Project title: ${input.title}`,
+          "",
+          "SECTIONS TO FILL (use these keys exactly, return all of them):",
+          brief,
+          "",
+          "--- PROJECT MATERIAL ---",
+          input.corpus,
+        ].join("\n"),
+      },
+    ],
+    response_format: zodResponseFormat(
+      CaseStudyOutlineSchema,
+      "case_study_outline",
+    ),
+  });
+
+  const parsed = completion.choices[0]?.message.parsed;
+  if (!parsed) {
+    throw new Error("Case study outline returned no parsed output");
+  }
   return parsed;
 }
