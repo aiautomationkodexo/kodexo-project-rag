@@ -10,7 +10,6 @@ import { formatDate } from "@/lib/format";
 import { ProfileForm } from "./profile-form";
 import { ClaimsForm } from "./claims-form";
 import { DangerZone } from "./danger-zone";
-import { GrantsForm } from "./grants-form";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +20,7 @@ export default async function UserPage(props: PageProps<"/users/[id]">) {
   const data = await getUser(id);
   if (!data) notFound();
 
-  const { profile, claims, grants } = data;
+  const { profile, claims } = data;
   const canUpdate = can(actor, "users:update");
   const canDelete = can(actor, "users:delete");
   const isSelf = actor.id === profile.id;
@@ -93,28 +92,6 @@ export default async function UserPage(props: PageProps<"/users/[id]">) {
           </CardContent>
         </Card>
       </div>
-
-      {/* Per-project access. Only for users:update holders — the grant write
-          is gated on that claim in RLS, so rendering it otherwise would offer
-          a control guaranteed to 42501. Super admins are excluded: they pass
-          every claim check by short-circuit, so a grant would be inert. */}
-      {canUpdate && !profile.is_super_admin ? (
-        <div className="mt-cell-x">
-          <Card>
-            <CardHeader
-              title="Per-project access"
-              description="Grants are additive — they widen access and never restrict it."
-            />
-            <CardContent>
-              <GrantsForm
-                userId={profile.id}
-                grants={grants}
-                hasGlobalView={claims.has("projects:view")}
-              />
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
 
       <div className="mt-cell-x">
         <DangerZone

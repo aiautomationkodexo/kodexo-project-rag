@@ -275,52 +275,6 @@ export type Database = {
           },
         ]
       }
-      project_grants: {
-        Row: {
-          claim: string
-          granted_at: string
-          granted_by: string | null
-          project_id: string
-          user_id: string
-        }
-        Insert: {
-          claim: string
-          granted_at?: string
-          granted_by?: string | null
-          project_id: string
-          user_id: string
-        }
-        Update: {
-          claim?: string
-          granted_at?: string
-          granted_by?: string | null
-          project_id?: string
-          user_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "project_grants_project_id_fkey"
-            columns: ["project_id"]
-            isOneToOne: false
-            referencedRelation: "projects"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "project_grants_user_id_fkey"
-            columns: ["user_id"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "project_grants_granted_by_fkey"
-            columns: ["granted_by"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       project_links: {
         Row: {
           created_at: string
@@ -620,10 +574,6 @@ export type Database = {
           project_id: string
           score: number
         }[]
-      }
-      may_grant_on_project: {
-        Args: { p_project: string; uid: string }
-        Returns: boolean
       }
       set_nda_status: {
         Args: { p_project: string; p_status: string }

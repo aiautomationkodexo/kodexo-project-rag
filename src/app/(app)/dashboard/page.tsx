@@ -16,7 +16,7 @@ import {
 import { StatCard, StatGrid } from "@/components/ui/stat-card";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Table, TBody, TD, TEmpty, TH, THead, TR, TableWrap } from "@/components/ui/table";
-import { can, requireProjectAccess } from "@/lib/auth/claims";
+import { can, requireClaim } from "@/lib/auth/claims";
 import { formatDate } from "@/lib/format";
 import { getPortfolioStats, listRecentProjects } from "@/lib/projects/queries";
 import { countUnapprovedTags } from "@/lib/tags/queries";
@@ -38,7 +38,7 @@ const RECENT_LIMIT = 8;
  * genuine problem state, which is exactly what that tier is for.
  */
 export default async function DashboardPage() {
-  const user = await requireProjectAccess();
+  const user = await requireClaim("projects:view");
   const showTags = can(user, "tags:manage");
 
   // Independent reads, so one round trip's latency rather than three.

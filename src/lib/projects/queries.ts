@@ -166,13 +166,6 @@ export async function getPortfolioStats(): Promise<{
     projectCount("processing"),
     projectCount("finalizing"),
     projectCount("ready"),
-    /*
-     * NO project_id filter, and none is needed: this goes through the USER's
-     * client, so documents_select_global OR documents_select_scoped (0018)
-     * already confines the count to documents of projects this user can see.
-     * Adding an explicit filter here would be a second copy of the rule, free
-     * to drift from the policy. Do not "fix" this.
-     */
     supabase
       .from("documents")
       .select("id", { count: "exact", head: true })

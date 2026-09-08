@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getCurrentUser, assertClaim, GRANT_PRESETS } from "@/lib/auth/claims";
+import { getCurrentUser, assertClaim } from "@/lib/auth/claims";
 import { can, type Claim } from "@/lib/auth/claim-set";
 import {
   normalizeEmail,
@@ -13,12 +13,6 @@ import {
   type UserFieldErrors,
 } from "@/lib/users/validate";
 import { writeAudit } from "@/lib/audit/write";
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isGrantPreset(v: string): v is keyof typeof GRANT_PRESETS {
-  return Object.prototype.hasOwnProperty.call(GRANT_PRESETS, v);
-}
 
 export type UserActionState = {
   error?: string;
@@ -366,129 +360,4 @@ export async function softDeleteUser(formData: FormData): Promise<void> {
 
   revalidatePath("/users");
   redirect("/users");
-}
-
-/**
- * ═══════════════════════════════════════════════════════════════════════════
- * Per-project grants (migration 0018)
- *
- * Both actions go through the USER's client, never the admin client. That is
- * not a preference: the per-row arms of grants_insert — `has_claim(uid, claim)`
- * ("cannot grant what you don't hold") and `may_grant_on_project(uid,
- * project_id)` ("cannot grant on a project you cannot see") — exist ONLY in
- * the policy. The admin client bypasses RLS and would silently void both.
- * ═══════════════════════════════════════════════════════════════════════════
- */
-
-/**
- * Grants a bundle of scoped claims on one project.
- *
- * Grants a BUNDLE, not a single claim, and that is what prevents the
- * write-only-cannot-read footgun: a projects:update row without a matching
- * projects:view row yields a user whose UPDATE passes the scoped policy and
- * then fails the post-image SELECT check with an opaque RLS error. No table
- * constraint can express that cross-row invariant.
- */
-export async function grantProjectAccess(
-  _prev: UserActionState,
-  formData: FormData,
-): Promise<UserActionState> {
-  const actor = await getCurrentUser();
-  if (!actor) return { error: "Your session has expired. Sign in again." };
-
-  try {
-    assertClaim(actor, "users:update");
-  } catch {
-    return { error: "You do not have permission to manage access." };
-  }
-
-  const userId = String(formData.get("userId") ?? "");
-  const projectId = String(formData.get("projectId") ?? "").trim();
-  const preset = String(formData.get("preset") ?? "");
-
-  if (!userId) return { error: "Missing user id." };
-  if (!UUID.test(projectId)) return { error: "Enter a valid project id." };
-  if (!isGrantPreset(preset)) return { error: "Choose an access level." };
-
-  const claims = GRANT_PRESETS[preset];
-  const supabase = await createClient();
-
-  /*
-   * ignoreDuplicates, as everywhere else in this codebase that upserts:
-   * PostgREST's default onConflict is DO UPDATE, which here would rewrite
-   * granted_by/granted_at on an existing row — quietly rewriting provenance
-   * on a grant somebody else made.
-   */
-  const { error } = await supabase.from("project_grants").upsert(
-    claims.map((claim) => ({
-      project_id: projectId,
-      user_id: userId,
-      claim,
-      granted_by: actor.id,
-    })),
-    { onConflict: "project_id,user_id,claim", ignoreDuplicates: true },
-  );
-
-  if (error) {
-    // 42501 is the policy refusing: either the actor lacks the claim they are
-    // trying to grant, or they cannot see the project. 23503 is a bad
-    // project/user id. 23514 is a claim outside the CHECK.
-    if (error.code === "42501") {
-      return {
-        error:
-          "You can only grant access you hold yourself, on projects you can see.",
-      };
-    }
-    if (error.code === "23503") return { error: "That project does not exist." };
-    return { error: error.message };
-  }
-
-  await writeAudit({
-    actorId: actor.id,
-    action: "project.grant",
-    entityType: "project",
-    entityId: projectId,
-    meta: { user_id: userId, claims: [...claims], preset },
-  });
-
-  revalidatePath(`/users/${userId}`);
-  return {};
-}
-
-/** Revokes every scoped claim a user holds on one project. */
-export async function revokeProjectAccess(formData: FormData): Promise<void> {
-  const actor = await getCurrentUser();
-  if (!actor) throw new Error("Your session has expired.");
-  assertClaim(actor, "users:update");
-
-  const userId = String(formData.get("userId") ?? "");
-  const projectId = String(formData.get("projectId") ?? "");
-  if (!userId || !projectId) throw new Error("Missing ids.");
-
-  const supabase = await createClient();
-
-  /*
-   * No may_grant_on_project requirement on delete — grants_delete omits it
-   * deliberately. REVOCATION MUST NEVER BE HARDER THAN GRANTING: that check
-   * tests deleted_at, so requiring it would make a grant on a soft-deleted
-   * project unremovable. Since the model has no deny primitive, removing a row
-   * can only ever REDUCE access.
-   */
-  const { error } = await supabase
-    .from("project_grants")
-    .delete()
-    .eq("user_id", userId)
-    .eq("project_id", projectId);
-
-  if (error) throw new Error(error.message);
-
-  await writeAudit({
-    actorId: actor.id,
-    action: "project.revoke",
-    entityType: "project",
-    entityId: projectId,
-    meta: { user_id: userId },
-  });
-
-  revalidatePath(`/users/${userId}`);
 }

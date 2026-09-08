@@ -43,36 +43,6 @@ export async function notifyProjectReady(
     const recipientId = project.last_updated_by ?? project.created_by;
     if (!recipientId) return;
 
-    /*
-     * SCOPE CHECK (0018). The admin client is in use here, so RLS provides no
-     * protection — without this, a user whose access to this project was
-     * revoked (or who only ever held a grant that has since been deleted)
-     * still receives a mail with a link to it.
-     *
-     * The link itself would 404 via notFound(), so this is a disclosure of the
-     * project's TITLE rather than of its contents. Small, but real, and cheap
-     * to close: has_claim() is the global arm and short-circuits on
-     * is_super_admin; the grant lookup is the scoped arm.
-     *
-     * canOn() cannot be used here — it reads the CURRENT session, and this
-     * runs from after()/cron with no user context at all.
-     */
-    const { data: globalView } = await admin.rpc("has_claim", {
-      uid: recipientId,
-      c: "projects:view",
-    });
-
-    if (!globalView) {
-      const { count: grantCount } = await admin
-        .from("project_grants")
-        .select("project_id", { count: "exact", head: true })
-        .eq("user_id", recipientId)
-        .eq("project_id", projectId)
-        .eq("claim", "projects:view");
-
-      if (!grantCount) return;
-    }
-
     // profiles_select does NOT reference deleted_at, so the app layer must
     // filter it (see CLAUDE.md). is_active matters too: a deactivated account
     // is forced through /auth/signout on its next request, so the link would be
