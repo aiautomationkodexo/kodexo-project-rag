@@ -162,6 +162,37 @@ RULES
 8. Order sections so general context comes before specifics.`;
 
 /**
+ * Appended to SUMMARY_SYSTEM when the project's NDA status does not permit
+ * naming the client (see disclosure() in src/lib/projects/disclosure.ts).
+ *
+ * ── WHY THIS IS CONDITIONAL AND NOT RULE 9 ────────────────────────────────
+ * A blanket "never name the client" rule would CONTRADICT rule 6, which
+ * mandates reproducing testimonials verbatim "with attribution when known" —
+ * and attribution is naming. Rule 6 is load-bearing (a paraphrased
+ * testimonial has no reuse value) and is asserted by `npm run test:llm`. Two
+ * rules giving opposite instructions about the same string produce
+ * unpredictable PARTIAL redaction, which is worse than none because it looks
+ * like a guarantee.
+ *
+ * So the suppression is scoped to the projects that actually require it, and
+ * it resolves the conflict in one direction explicitly: quote bodies stay
+ * verbatim (rule 6 wins), attribution moves to role rather than name.
+ *
+ * ── AND IT IS A MITIGATION, NOT A CONTROL ─────────────────────────────────
+ * The model still receives the client's name in the corpus, because
+ * documents.raw_text genuinely contains it. This asks the model not to repeat
+ * it. That is a request, not a boundary. The structural guarantee is that
+ * project_client is never read here at all (see finalize-project.ts).
+ */
+export const CLIENT_ANONYMITY_RULE = `
+9. Do NOT name the client organisation, and do not include client contact
+   names. Refer to them as "the client".
+   Rule 6 still applies to quote BODIES — reproduce them verbatim, even where
+   the quoted text names the organisation itself. Change only the attribution:
+   give the speaker's role ("the client's Head of Operations"), never a
+   personal name.`;
+
+/**
  * Suggested starting keys are a HINT, not a requirement. Without an anchor a
  * thin description comes back as a single blob keyed `summary`, and every later
  * regeneration inherits that shape.
@@ -175,8 +206,17 @@ export async function generateSummary(input: {
   existing: Summary | null;
   /** New material only — NOT the whole corpus re-summarised. */
   newDocuments: { filename: string; docRole: string | null; text: string }[];
+  /**
+   * False when the project's NDA terms forbid naming the client. Defaults to
+   * FALSE — fail closed, matching disclosure()'s own default, so a caller that
+   * forgets to pass it gets the anonymised prompt rather than the leaky one.
+   */
+  mayUseClientName?: boolean;
 }): Promise<GeneratedSummary> {
   const openai = client();
+  const systemPrompt = input.mayUseClientName
+    ? SUMMARY_SYSTEM
+    : SUMMARY_SYSTEM + CLIENT_ANONYMITY_RULE;
   const isFirst = !input.existing?.sections?.length;
 
   const documents = input.newDocuments
@@ -206,7 +246,7 @@ export async function generateSummary(input: {
   const completion = await openai.chat.completions.parse({
     model: CHAT_MODEL,
     messages: [
-      { role: "system", content: SUMMARY_SYSTEM },
+      { role: "system", content: systemPrompt },
       { role: "user", content: userContent },
     ],
     response_format: zodResponseFormat(SummarySchema, "summary"),

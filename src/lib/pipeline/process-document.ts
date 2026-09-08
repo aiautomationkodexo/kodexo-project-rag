@@ -41,7 +41,9 @@ export async function processDocument(documentId: string): Promise<{
 
   const { data: doc } = await admin
     .from("documents")
-    .select("id, project_id, filename, mime, storage_key, raw_text, attempts, is_synthetic")
+    .select(
+      "id, project_id, filename, mime, storage_key, raw_text, attempts, is_synthetic, visibility",
+    )
     .eq("id", documentId)
     .maybeSingle();
 
@@ -60,6 +62,75 @@ export async function processDocument(documentId: string): Promise<{
       throw new PermanentExtractionError(
         "No text could be extracted from this document.",
       );
+    }
+
+    /*
+     * ── no_index: stored, never embedded ──────────────────────────────────
+     *
+     * PLACEMENT IS LOAD-BEARING, and all four of these are required:
+     *
+     * 1. AFTER extraction, not before. §15.2: raw_text is NEVER dropped — it
+     *    is the re-chunk path and the ONLY thing that makes flipping a
+     *    document back out of no_index possible. Skipping extraction would
+     *    make no_index a one-way door: the bucket object can be purged by the
+     *    0009 sweep, and storage_key is NULL for synthetic documents, so
+     *    there would be no source to re-chunk from, ever.
+     *
+     * 2. BEFORE chunkText/embedBatch. That is the point — no chunks, no
+     *    embeddings, no OpenAI call, nothing in the vector index.
+     *
+     * 3. DELETE existing chunks, not merely skip inserting them. A document
+     *    flipped INTO no_index after it was already processed still has its
+     *    chunk set, and search would keep citing it. Idempotent (a
+     *    never-indexed document has none) and it reuses §15.3's
+     *    replace-the-whole-set discipline.
+     *
+     * 4. status 'done', not a new status and not 'failed'. claim_finalize
+     *    counts documents in ('queued','processing') as pending, so anything
+     *    non-terminal here holds the project in `processing` FOREVER —
+     *    claim_finalize returns false on every call and no summary is ever
+     *    generated. This document is genuinely finished; it just produced no
+     *    chunks. The `return` hands projectId back exactly as the success
+     *    path does, so the caller still reaches maybeFinalize.
+     */
+    if (doc.visibility === "no_index") {
+      await admin.from("chunks").delete().eq("document_id", doc.id);
+
+      const { error: skipError } = await admin
+        .from("documents")
+        .update({
+          status: "done",
+          raw_text: text, // §15.2. The re-chunk path.
+          content_hash: contentHash(text),
+          error: null,
+        })
+        .eq("id", doc.id);
+
+      if (skipError) {
+        // 23505 is possible here for the same reason it is on the success
+        // path: two documents with identical extracted text. Handled
+        // identically and terminally — falling through to the generic catch
+        // would set 'queued', the sweep would re-dispatch, attempts would
+        // climb to 3, and stuck_documents' own `attempts < 3` filter would
+        // then stop selecting it: permanently stuck, project never `ready`.
+        if (skipError.code === "23505") {
+          await admin
+            .from("documents")
+            .update({
+              status: "failed",
+              attempts: MAX_ATTEMPTS,
+              error:
+                "This document duplicates another file already attached to " +
+                "this project. Remove it, or rename it if the duplication is " +
+                "intentional.",
+            })
+            .eq("id", doc.id);
+          return { projectId: doc.project_id, ok: false };
+        }
+        throw new Error(skipError.message);
+      }
+
+      return { projectId: doc.project_id, ok: true };
     }
 
     const pieces = chunkText(text);

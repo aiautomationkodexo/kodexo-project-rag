@@ -9,6 +9,7 @@ import {
   renderSummary,
 } from "@/lib/ai/openai";
 import { asSummary, type Summary } from "@/lib/types";
+import { disclosure } from "@/lib/projects/disclosure";
 import { toVectorOrNull } from "@/lib/supabase/vector";
 import {
   notifyProjectReady,
@@ -69,18 +70,35 @@ export async function finalizeProject(
   try {
     const { data: project } = await admin
       .from("projects")
-      .select("id, title, summary")
+      .select("id, title, summary, nda_status")
       .eq("id", projectId)
       .maybeSingle();
 
     if (!project) return "error";
 
+    /*
+     * ⚠ project_client IS DELIBERATELY NOT READ HERE, and must never be.
+     *   Everything gathered below is fed verbatim to OpenAI and lands in
+     *   summary_text, which IS embedded — so adding client_name to any select
+     *   in this function is how the gated field enters the vector index and
+     *   becomes retrievable to every projects:view holder. The admin client is
+     *   in use, so RLS provides ZERO protection at this point: the absence of
+     *   the join is the whole enforcement.
+     *
+     * The `visibility` filter is the SECOND no_index enforcement point, and
+     * skipping the chunking alone is NOT sufficient. A no_index document
+     * reaches status 'done' with raw_text populated (§15.2 requires that), so
+     * without this filter its text would still be summarised and embedded
+     * into summary_text — making "stored, never embedded" false by exactly
+     * the route the chunk skip appears to have closed.
+     */
     const { data: documents } = await admin
       .from("documents")
       .select("id, filename, doc_role, raw_text")
       .eq("project_id", projectId)
       .eq("status", "done")
       .eq("is_active", true)
+      .neq("visibility", "no_index")
       .order("created_at", { ascending: true });
 
     const usable = (documents ?? []).filter((d) => d.raw_text?.trim());
@@ -139,9 +157,14 @@ export async function finalizeProject(
     }
 
     // ── Summary, additive open sections ──────────────────────────────────
+    // The NDA gate on the prompt. disclosure() fails closed, so a project with
+    // no NDA answer is summarised WITHOUT permission to name the client — the
+    // conservative direction, and the same default generateSummary applies if
+    // the flag is omitted entirely.
     const generated = await generateSummary({
       title: project.title,
       existing,
+      mayUseClientName: disclosure(project.nda_status).mayUseClientName,
       newDocuments: usable.map((d) => ({
         filename: d.filename,
         docRole: d.doc_role,

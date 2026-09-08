@@ -94,6 +94,9 @@ export function LiveStatus({
                     status: row.status ?? "queued",
                     error: row.error ?? null,
                     is_synthetic: row.is_synthetic ?? false,
+                    // 'indexed' matches the column default, so a Realtime
+                    // payload that omits it describes an ordinary document.
+                    visibility: row.visibility ?? "indexed",
                   },
                 ],
           );

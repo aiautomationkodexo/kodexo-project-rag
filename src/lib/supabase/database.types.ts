@@ -141,6 +141,7 @@ export type Database = {
           status: string
           storage_key: string | null
           updated_at: string
+          visibility: string
         }
         Insert: {
           attempts?: number
@@ -159,6 +160,7 @@ export type Database = {
           status?: string
           storage_key?: string | null
           updated_at?: string
+          visibility?: string
         }
         Update: {
           attempts?: number
@@ -177,6 +179,7 @@ export type Database = {
           status?: string
           storage_key?: string | null
           updated_at?: string
+          visibility?: string
         }
         Relationships: [
           {
@@ -235,6 +238,77 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      project_client: {
+        Row: {
+          client_name: string | null
+          project_id: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          client_name?: string | null
+          project_id: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          client_name?: string | null
+          project_id?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "project_client_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: true
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "project_client_updated_by_fkey"
+            columns: ["updated_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      project_links: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          project_id: string
+          title: string | null
+          url: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          project_id: string
+          title?: string | null
+          url?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          project_id?: string
+          title?: string | null
+          url?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "project_links_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       project_summaries: {
         Row: {
@@ -304,14 +378,19 @@ export type Database = {
           created_by: string | null
           deleted_at: string | null
           description: string | null
+          end_date: string | null
+          engagement_type: string | null
           id: string
           industry: string | null
           industry_confidence: number | null
           last_updated_by: string | null
+          nda_status: string | null
+          start_date: string | null
           status: string
           summary: Json | null
           summary_embedding: string | null
           summary_text: string | null
+          team_size: number | null
           title: string
           updated_at: string
         }
@@ -320,14 +399,19 @@ export type Database = {
           created_by?: string | null
           deleted_at?: string | null
           description?: string | null
+          end_date?: string | null
+          engagement_type?: string | null
           id?: string
           industry?: string | null
           industry_confidence?: number | null
           last_updated_by?: string | null
+          nda_status?: string | null
+          start_date?: string | null
           status?: string
           summary?: Json | null
           summary_embedding?: string | null
           summary_text?: string | null
+          team_size?: number | null
           title: string
           updated_at?: string
         }
@@ -336,14 +420,19 @@ export type Database = {
           created_by?: string | null
           deleted_at?: string | null
           description?: string | null
+          end_date?: string | null
+          engagement_type?: string | null
           id?: string
           industry?: string | null
           industry_confidence?: number | null
           last_updated_by?: string | null
+          nda_status?: string | null
+          start_date?: string | null
           status?: string
           summary?: Json | null
           summary_embedding?: string | null
           summary_text?: string | null
+          team_size?: number | null
           title?: string
           updated_at?: string
         }
@@ -485,6 +574,10 @@ export type Database = {
           project_id: string
           score: number
         }[]
+      }
+      set_nda_status: {
+        Args: { p_project: string; p_status: string }
+        Returns: boolean
       }
       soft_delete_project: { Args: { p_project: string }; Returns: boolean }
       stranded_projects: {

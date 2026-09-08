@@ -100,6 +100,22 @@ export type DocumentRow = {
   status: DocumentStatus;
   error: string | null;
   is_synthetic: boolean;
+  /** 'indexed' | 'no_index'. See migration 0016 and DocumentVisibility. */
+  visibility: string;
 };
+
+/**
+ * Document visibility (migration 0016). Same reasoning as the status unions
+ * above: a CHECK constraint, so the type generator emits plain `string`.
+ */
+export type DocumentVisibility = "indexed" | "no_index";
+
+const DOCUMENT_VISIBILITIES: readonly string[] = ["indexed", "no_index"];
+
+export function asDocumentVisibility(value: string): DocumentVisibility {
+  return DOCUMENT_VISIBILITIES.includes(value)
+    ? (value as DocumentVisibility)
+    : "indexed";
+}
 
 export type Tone = "neutral" | "invert" | "ok" | "warn" | "err" | "info";

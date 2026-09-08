@@ -4,11 +4,17 @@ import { after } from "next/server";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { getCurrentUser, assertClaim } from "@/lib/auth/claims";
 import { dispatch } from "@/lib/pipeline/dispatch";
 import { contentHash } from "@/lib/pipeline/process-document";
 import { MIN_CHUNK } from "@/lib/pipeline/chunk";
-import { validateProjectInput, type FieldErrors } from "@/lib/projects/validate";
+import {
+  validateProjectInput,
+  validateProjectMeta,
+  type FieldErrors,
+} from "@/lib/projects/validate";
+import { parseLinks, MAX_LINKS_PER_PROJECT } from "@/lib/projects/links";
 import { writeAudit } from "@/lib/audit/write";
 import { MAX_FILES_PER_PROJECT } from "@/lib/uploads/mime";
 
@@ -38,6 +44,40 @@ function parseUploaded(raw: FormDataEntryValue | null): UploadedFile[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Reads the Part C/D metadata fields off a form post.
+ *
+ * "" means "not supplied" for every one of them: a cleared <input> and an
+ * absent key are indistinguishable in a form post, and both mean NULL.
+ */
+function parseMeta(formData: FormData) {
+  return {
+    engagementType: String(formData.get("engagement_type") ?? "").trim(),
+    startDate: String(formData.get("start_date") ?? "").trim(),
+    endDate: String(formData.get("end_date") ?? "").trim(),
+    teamSize: String(formData.get("team_size") ?? "").trim(),
+    // NOT read from the form. nda_status is writable only through
+    // set_nda_status() (migration 0013), because `projects` has a column-level
+    // grant that excludes it — a PATCH carrying nda_status gets 42501.
+    ndaStatus: "",
+  };
+}
+
+/**
+ * The columns, from validated meta. `|| null` and never `|| undefined`:
+ * PostgREST OMITS undefined keys, which on an INSERT means the column default
+ * applies and on an UPDATE means "leave unchanged" — so a cleared field would
+ * silently keep its old value instead of being cleared.
+ */
+function metaColumns(meta: ReturnType<typeof parseMeta>) {
+  return {
+    engagement_type: meta.engagementType || null,
+    start_date: meta.startDate || null,
+    end_date: meta.endDate || null,
+    team_size: meta.teamSize ? Number(meta.teamSize) : null,
+  };
 }
 
 /**
@@ -77,7 +117,16 @@ export async function createProject(
   // Threaded from the real count, not hard-coded 0: descriptionMinFor() drops
   // the 200-char minimum to 0 once files are attached, and passing 0 here made
   // the server reject exactly the submissions the client had just permitted.
-  const fieldErrors = validateProjectInput({ title, description }, uploaded.length);
+  const meta = parseMeta(formData);
+  const links = parseLinks(String(formData.get("links") ?? ""));
+  if (links.length > MAX_LINKS_PER_PROJECT) {
+    return { error: `A project can hold at most ${MAX_LINKS_PER_PROJECT} links.` };
+  }
+
+  const fieldErrors = {
+    ...validateProjectInput({ title, description }, uploaded.length),
+    ...validateProjectMeta(meta),
+  };
   if (Object.keys(fieldErrors).length > 0) return { fieldErrors };
 
   let projectId: string;
@@ -99,6 +148,7 @@ export async function createProject(
         status: "processing",
         created_by: user.id,
         last_updated_by: user.id,
+        ...metaColumns(meta),
       })
       .select("id")
       .single();
@@ -177,6 +227,20 @@ export async function createProject(
     if (documentIds.length === 0) {
       return { error: "Add a description or attach at least one document." };
     }
+
+    // Links are metadata, not corpus: they are never chunked or embedded, so
+    // this insert sits outside the documentIds bookkeeping entirely and does
+    // not affect whether the project has anything to process.
+    if (links.length > 0) {
+      const { error: linksError } = await supabase.from("project_links").insert(
+        links.map((l) => ({
+          project_id: projectId,
+          url: l.url,
+          title: l.title,
+        })),
+      );
+      if (linksError) return { error: linksError.message };
+    }
   } catch (error) {
     return {
       error: error instanceof Error ? error.message : "Could not create the project.",
@@ -223,6 +287,7 @@ export async function updateProject(
   const projectId = String(formData.get("projectId") ?? "");
   const title = String(formData.get("title") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
+  const meta = parseMeta(formData);
   if (!projectId) return { error: "Missing project id." };
 
   const supabase = await createClient();
@@ -236,10 +301,10 @@ export async function updateProject(
     .eq("is_active", true)
     .eq("is_synthetic", false);
 
-  const fieldErrors = validateProjectInput(
-    { title, description },
-    fileCount ?? 0,
-  );
+  const fieldErrors = {
+    ...validateProjectInput({ title, description }, fileCount ?? 0),
+    ...validateProjectMeta(meta),
+  };
   if (Object.keys(fieldErrors).length > 0) return { fieldErrors };
 
   const { data: synthetic } = await supabase
@@ -258,6 +323,11 @@ export async function updateProject(
       title,
       description,
       last_updated_by: user.id,
+      // UNCONDITIONAL, deliberately outside the descriptionChanged spread:
+      // none of these columns is read by the pipeline, so changing team_size
+      // must not re-run the summariser. The existing gate below is what keeps
+      // a metadata edit from costing an OpenAI call.
+      ...metaColumns(meta),
       ...(descriptionChanged ? { status: "processing" as const } : {}),
     })
     .eq("id", projectId);
@@ -431,6 +501,173 @@ export async function addFilesToProject(
 
   // 3. Only now dispatch.
   after(() => dispatch(documentIds, projectId));
+  revalidatePath(`/projects/${projectId}`);
+  return {};
+}
+
+/**
+ * Sets a project's NDA/disclosure status.
+ *
+ * Goes through the `set_nda_status` RPC, not a direct update, and that is not
+ * a stylistic choice: migration 0013 revoked the table-level UPDATE grant on
+ * `projects` and re-granted every column EXCEPT nda_status, so a PATCH
+ * carrying it receives 42501. The definer function re-checks the claim in SQL
+ * and re-proves the project is visible.
+ *
+ * The assertClaim below is therefore the UX layer — it produces a readable
+ * message instead of a raw Postgres error — while the RPC is the boundary.
+ */
+export async function setNdaStatus(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "Your session has expired. Sign in again." };
+
+  try {
+    assertClaim(user, "projects:set-nda");
+  } catch {
+    return { error: "You do not have permission to set disclosure status." };
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const ndaStatus = String(formData.get("nda_status") ?? "").trim();
+  if (!projectId) return { error: "Missing project id." };
+
+  const fieldErrors = validateProjectMeta({
+    engagementType: "",
+    startDate: "",
+    endDate: "",
+    teamSize: "",
+    ndaStatus,
+  });
+  if (Object.keys(fieldErrors).length > 0) return { fieldErrors };
+
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("set_nda_status", {
+    p_project: projectId,
+    // "" clears it back to "nobody has decided", which disclosure() treats
+    // exactly like Permanently Excluded.
+    p_status: ndaStatus || null,
+  } as { p_project: string; p_status: string });
+
+  if (error) return { error: error.message };
+
+  await writeAudit({
+    actorId: user.id,
+    action: "project.set_nda_status",
+    entityType: "project",
+    entityId: projectId,
+    // The VALUE is recorded deliberately: this is a legal determination and
+    // "who changed it to what, when" is the entire point of auditing it.
+    meta: { nda_status: ndaStatus || null },
+  });
+
+  revalidatePath(`/projects/${projectId}`);
+  return {};
+}
+
+/**
+ * Flips one document between 'indexed' and 'no_index'.
+ *
+ * The two directions are NOT symmetrical:
+ *
+ *   → no_index : delete the chunk set. The document keeps raw_text (§15.2) so
+ *                the change is reversible, but its chunks must go or search
+ *                would keep citing a source the project no longer indexes.
+ *                No re-summary is needed — finalizeProject already excludes
+ *                no_index documents from its corpus.
+ *
+ *   → indexed  : re-queue and re-dispatch. processDocument reads raw_text and
+ *                re-chunks with no extraction and no Storage read, which is
+ *                exactly why §15.2 exists.
+ *
+ * The ORDER in the second branch is the same load-bearing sequence
+ * addFilesToProject documents: queue the document, THEN flip the project to
+ * `processing`, THEN dispatch. Reversed, claim_finalize can win before the
+ * document is queued and the project reaches `ready` with the re-chunk still
+ * pending; and if the project is left `ready`, claim_finalize returns false
+ * forever and no re-summary ever happens.
+ */
+export async function setDocumentVisibility(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "Your session has expired. Sign in again." };
+
+  try {
+    assertClaim(user, "projects:update");
+  } catch {
+    return { error: "You do not have permission to edit projects." };
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const documentId = String(formData.get("documentId") ?? "");
+  const visibility = String(formData.get("visibility") ?? "");
+  if (!projectId || !documentId) return { error: "Missing document id." };
+  if (visibility !== "indexed" && visibility !== "no_index") {
+    return { error: "Unknown visibility." };
+  }
+
+  const supabase = await createClient();
+
+  // The user's client: documents_update is the authorization check.
+  const { error: visError } = await supabase
+    .from("documents")
+    .update({ visibility })
+    .eq("id", documentId)
+    .eq("project_id", projectId);
+
+  if (visError) return { error: visError.message };
+
+  if (visibility === "no_index") {
+    // Chunks are service-role-only (0002: "written exclusively by the
+    // pipeline via the service role"), so this cannot go through the user's
+    // client — there is no chunks policy that would permit it.
+    const admin = createAdminClient();
+    const { error: delError } = await admin
+      .from("chunks")
+      .delete()
+      .eq("document_id", documentId);
+    if (delError) return { error: delError.message };
+
+    await writeAudit({
+      actorId: user.id,
+      action: "document.no_index",
+      entityType: "document",
+      entityId: documentId,
+      meta: { project_id: projectId },
+    });
+
+    revalidatePath(`/projects/${projectId}`);
+    return {};
+  }
+
+  // → indexed. Re-queue first.
+  const { error: queueError } = await supabase
+    .from("documents")
+    .update({ status: "queued", attempts: 0, error: null })
+    .eq("id", documentId);
+  if (queueError) return { error: queueError.message };
+
+  // THEN the project, or claim_finalize never fires (it only acts on
+  // `processing`) and no re-summary happens.
+  const { error: projError } = await supabase
+    .from("projects")
+    .update({ status: "processing", last_updated_by: user.id })
+    .eq("id", projectId);
+  if (projError) return { error: projError.message };
+
+  await writeAudit({
+    actorId: user.id,
+    action: "document.reindex",
+    entityType: "document",
+    entityId: documentId,
+    meta: { project_id: projectId },
+  });
+
+  after(() => dispatch([documentId], projectId));
   revalidatePath(`/projects/${projectId}`);
   return {};
 }

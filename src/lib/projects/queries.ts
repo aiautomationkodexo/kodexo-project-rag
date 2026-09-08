@@ -250,7 +250,10 @@ export async function getProject(id: string) {
   const { data: project } = await supabase
     .from("projects")
     .select(
-      "id, title, description, status, industry, industry_confidence, summary, summary_text, created_at, updated_at, created_by, last_updated_by",
+      // §15.10: an explicit list, never select("*"). A column missing from
+      // here does not fail — it arrives `undefined` and renders as "—", which
+      // is a silent wrong answer. Add new project columns HERE.
+      "id, title, description, status, industry, industry_confidence, summary, summary_text, created_at, updated_at, created_by, last_updated_by, engagement_type, start_date, end_date, team_size, nda_status",
     )
     .eq("id", id)
     .is("deleted_at", null)
@@ -258,11 +261,18 @@ export async function getProject(id: string) {
 
   if (!project) return null;
 
-  const [{ data: documents }, { data: tagRows }, { data: people }] =
-    await Promise.all([
+  const [
+    { data: documents },
+    { data: tagRows },
+    { data: people },
+    { data: links },
+    { data: client },
+  ] = await Promise.all([
       supabase
         .from("documents")
-        .select("id, filename, mime, doc_role, status, error, is_synthetic")
+        .select(
+          "id, filename, mime, doc_role, status, error, is_synthetic, visibility",
+        )
         .eq("project_id", id)
         .eq("is_active", true)
         .order("created_at", { ascending: true }),
@@ -279,6 +289,26 @@ export async function getProject(id: string) {
             (v): v is string => !!v,
           ),
         ),
+      supabase
+        .from("project_links")
+        .select("id, url, title, description")
+        .eq("project_id", id)
+        .order("created_at", { ascending: true }),
+      /*
+       * Client information. NO CLAIM CHECK HERE, deliberately — this goes
+       * through the USER's client and project_client_select is the boundary.
+       * A caller without projects:view-client-info gets zero rows, not an
+       * error, so every page can ask unconditionally and render what it may.
+       *
+       * Doing it this way rather than branching on can() means there is no
+       * second copy of the authorization rule to drift out of step with the
+       * policy — the separate table is the structural guarantee (0014).
+       */
+      supabase
+        .from("project_client")
+        .select("client_name, updated_at")
+        .eq("project_id", id)
+        .maybeSingle(),
     ]);
 
   const byId = new Map((people ?? []).map((p) => [p.id, p]));
@@ -294,5 +324,8 @@ export async function getProject(id: string) {
       .filter((t): t is NonNullable<typeof t> => !!t),
     createdBy: project.created_by ? byId.get(project.created_by) : null,
     updatedBy: project.last_updated_by ? byId.get(project.last_updated_by) : null,
+    links: links ?? [],
+    /** Null when the reader lacks projects:view-client-info, or none is set. */
+    client: client ?? null,
   };
 }

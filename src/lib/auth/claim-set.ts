@@ -15,6 +15,11 @@ export const CLAIMS = [
   "projects:create",
   "projects:update",
   "projects:delete",
+  // Part B/C. Deliberately NOT in any PRESET: client identity and disclosure
+  // terms are always a deliberate grant, never a side effect of picking a
+  // convenience bundle.
+  "projects:view-client-info",
+  "projects:set-nda",
   "users:view",
   "users:create",
   "users:update",
@@ -48,6 +53,8 @@ export const CLAIM_LABELS: Record<Claim, string> = {
   "projects:create": "Create projects",
   "projects:update": "Edit projects",
   "projects:delete": "Delete projects",
+  "projects:view-client-info": "View client information",
+  "projects:set-nda": "Set NDA and disclosure status",
   "users:view": "View users",
   "users:create": "Create users",
   "users:update": "Edit users and their permissions",
