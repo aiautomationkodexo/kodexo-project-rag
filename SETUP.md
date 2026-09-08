@@ -340,6 +340,162 @@ the last is the one that catches a `maybeFinalize` regression:
 7. A project whose **only** document is `no_index` still reaches `ready` —
    this exercises `finalizeProject`'s `usable.length === 0` branch.
 
+### 2.2 Verify `0017`–`0018` (scoped per-project access)
+
+`0017` is `parallel safe` alone; push and observe it before `0018` so any
+performance change has one candidate cause.
+
+`0018` is additive and reversible: the global arms are byte-for-byte what they
+were, and the scoped arms match nothing while `project_grants` is empty. So the
+push itself should be a behavioural no-op — verify that first.
+
+```sql
+-- 1. parallel safe landed. 's' = safe, 'u' = unsafe.
+select proname, proparallel from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname='public'
+  and proname in ('is_active_user','is_super_admin','has_claim',
+                  'may_grant_on_project')
+order by proname;
+-- Expect 's' for all four. A 'u' means the whole statement runs serially.
+
+-- 2. Every policy is PAIRED. Expect _global and _scoped for each of
+--    projects_select/update, ptt_select, ptt_write, summaries_select,
+--    documents_select/insert/update, chunks_select, links_select/write.
+--    projects_delete and documents_delete are GLOBAL-ONLY by decision;
+--    projects_insert is deliberately unpaired (nothing to scope on INSERT).
+select tablename, policyname, cmd from pg_policies
+where schemaname='public'
+  and tablename in ('projects','project_tech_tags','project_summaries',
+                    'documents','chunks','project_links','project_grants')
+order by tablename, policyname;
+
+-- 3. THE SHAPE CHECK — the most important query here, because the failure it
+--    catches is silent: correct results, ~1000x slower. ZERO rows expected.
+--    A row means a scoped policy was written with a correlated EXISTS.
+select tablename, policyname
+from pg_policies
+where schemaname='public'
+  and policyname like '%\_scoped'
+  and coalesce(qual,'') || coalesce(with_check,'')
+      not like '%IN ( SELECT project_grants.project_id%';
+
+-- 4. The claim vocabulary. MUST agree with SCOPED_CLAIMS in
+--    src/lib/auth/claim-set.ts (tests/scoped-claims.test.mts asserts this).
+select pg_get_constraintdef(oid) from pg_constraint
+where conrelid='public.project_grants'::regclass
+  and conname='project_grants_claim_check';
+-- Expect exactly projects:view and projects:update.
+
+-- 5. The index ordering. user_id must LEAD — it is the constant in every
+--    scoped arm, so the planner seeks one user's contiguous slice. project_id
+--    leading is the PK and cannot serve the hot path.
+select indexname, indexdef from pg_indexes
+where tablename='project_grants' order by indexname;
+
+-- 6. project_grants has no UPDATE policy, and UPDATE/TRUNCATE are revoked.
+select privilege_type from information_schema.table_privileges
+where table_schema='public' and table_name='project_grants'
+  and grantee='authenticated' order by privilege_type;
+-- Expect SELECT, INSERT, DELETE (+REFERENCES). NO UPDATE, NO TRUNCATE.
+
+-- 7. Both definer functions were actually rewritten.
+select proname, prosrc like '%project_grants%' as is_scoped
+from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+where n.nspname='public' and proname in ('search_projects','set_nda_status');
+-- search_projects MUST be true. A false means 0005's standing invariant is
+-- LIVE: every scoped user sees the entire portfolio through search.
+```
+
+**Behavioural checks, as a real user.** Create a test account with **no** flat
+claims (remove the `projects:view` that `grant_default_claims` adds) and one
+`Viewer` grant on a single project.
+
+1. **No regression for existing users.** A user with global `projects:view` and
+   zero grants sees the same project count as before.
+2. **Scoped viewer.** `/projects` lists exactly one project. A direct URL to a
+   non-granted project **404s** — not a redirect. A redirect means
+   `requireClaim` is still on the detail page and the feature does not work.
+3. **Scoped search.** Search a term matching only a non-granted project → no
+   results. Search a term matching *their* project → **a result appears.** This
+   second half is where the HNSW recall problem shows up, and it is the check
+   most likely to fail.
+4. **Scoped editor.** Add an `Editor` grant: the Edit form appears, saving
+   works, and the Delete button does **not** appear (delete stays global).
+5. **The escalation regression test.** Grant `Editor` on project A only, then
+   call `select soft_delete_project('<B-id>')` directly. Must raise
+   `Missing permission: projects:delete` — grants cannot carry delete.
+6. **Cannot grant what you do not hold.** As a `users:update` holder lacking
+   `projects:update`, insert a `projects:update` grant → **42501**. Insert
+   `claim='users:delete'` → **23514** — a *different* error, proving both the
+   policy and the CHECK are live.
+7. **Cannot grant on an invisible project.** As a scoped `users:update` holder
+   with a view grant on A only, grant someone access to B → **42501**
+   (`may_grant_on_project`).
+8. **Revocation is laxer than granting, deliberately.** Soft-delete project A,
+   then revoke a grant on it → **must succeed**. Requiring
+   `may_grant_on_project` on delete would make it unremovable.
+9. **Deactivated grantee.** Set the scoped user `is_active = false`; their
+   search must raise `Missing permission: projects:view`. This exercises the
+   explicit `is_active_user` arm — the check that is *not* inherited, because
+   these arms never call `has_claim`.
+
+**The plan shape.** Non-negotiable, and it must be run **as a grants-only user
+with real grant rows** — as a global holder the scoped arm short-circuits, and
+against an empty table every plan looks fine.
+
+```sql
+explain (analyze, buffers)
+select id, title from projects where deleted_at is null limit 20;
+
+explain (analyze, buffers)
+select id, left(text,80) from chunks where is_active limit 50;
+```
+
+**Good** — any one of: an `InitPlan` near the top with the scan's filter
+referencing `$0`; a `Hash Semi Join` against `project_grants`; an
+`Index Only Scan using project_grants_user_claim_idx` with **`loops=1`**; or a
+subplan the plan text marks `(hashed SubPlan 1)`.
+
+**Bad** — stop and fix:
+
+- **`Filter: (SubPlan 1)` with `loops=` at or near the outer row count.** This
+  is *the* failure: the subquery went correlated and re-executes per row.
+- `Seq Scan on project_grants` with `loops > 1` — the index is not being used.
+- `project_grants.project_id = projects.id` **inside** a SubPlan rather than in
+  a join node — textbook correlation.
+- `Workers Planned: 0` on a large scan — a `parallel unsafe` function slipped
+  back in; cross-check `pg_proc.proparallel` above.
+- Estimated `rows=` off by more than ~10x from `actual rows=` on the node above
+  the policy. RLS degrades *selectivity estimation*, not only plan choice,
+  because non-leakproof operators may not consult statistics, and bad estimates
+  produce bad plans downstream.
+
+`set row_security = off;` is a useful assertion tool: it does **not** bypass
+RLS, it *errors* if the results would have been filtered by a policy. Use it to
+prove a query is or is not policy-dependent.
+
+**Rollout.** The migration is step 2 of four, and steps 3–4 are per-user and
+instantly reversible:
+
+1. Ship `project_grants` empty — no policy references it. Zero change.
+2. Add the scoped policies (this migration). Still zero change — table empty.
+3. New restricted users get grants **instead of** the blanket claim. Existing
+   users untouched; the two populations coexist indefinitely.
+4. Per user: grant explicit rows, **verify**, then remove their blanket claim.
+   Grant first and revoke second, never the reverse.
+
+**Do not mass-backfill** a grant per (user, project) pair. It is a cross join
+encoding no intent, can never be safely narrowed later because nobody will know
+which rows were deliberate, and is worse than the blanket claim because it
+*looks* specific.
+
+**`grant_default_claims` is deliberately unchanged**: every new non-super-admin
+still gets a global `projects:view`, so nothing breaks on rollout. A restricted
+user is made by revoking that claim and adding grants. The distinction to
+record per user: *"global because it is right"* is a correct end state,
+*"global because nobody narrowed it"* is drift.
+
 ---
 
 ## 3. Email (Google SMTP + App Password)
